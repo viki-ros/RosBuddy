@@ -273,7 +273,7 @@ class ToolInvoker:
                 except Exception as e_unlink: print(f"Error unlinking temp script {script_path_obj}: {e_unlink}")
 
     # Public Methods
-    def colcon_build(self, package_name: Optional[str] = None, realtime_output_callback: Optional[Callable[[str], None]] = None) -> Tuple[bool, str, str]: # No process object return for build/clean
+    def colcon_build(self, package_name: Optional[str] = None, realtime_output_callback: Optional[Callable[[str], None]] = None, process_started_callback: Optional[Callable[[subprocess.Popen], None]] = None) -> Tuple[bool, str, str]:
         active_ws_path = self.workspace_manager.get_active_workspace_path()
         if not active_ws_path: return False, "", "No active workspace."
         if not self.bash_executable: return False, "", "Bash not found."
@@ -292,10 +292,10 @@ class ToolInvoker:
         full_script_content = "\n".join(script_lines)
         
         print(f"DEBUG: Full script for colcon build:\n{full_script_content}")
-        success, stdout, stderr, _ = self._execute_bash_c_script(full_script_content, cwd=str(active_ws_path), realtime_output_callback=realtime_output_callback)
+        success, stdout, stderr, _ = self._execute_bash_c_script(full_script_content, cwd=str(active_ws_path), realtime_output_callback=realtime_output_callback, process_started_callback=process_started_callback)
         return success, stdout, stderr
 
-    def colcon_clean(self, realtime_output_callback: Optional[Callable[[str], None]] = None) -> Tuple[bool, str, str]: # No process object return
+    def colcon_clean(self, realtime_output_callback: Optional[Callable[[str], None]] = None, process_started_callback: Optional[Callable[[subprocess.Popen], None]] = None) -> Tuple[bool, str, str]:
         active_ws_path = self.workspace_manager.get_active_workspace_path()
         if not active_ws_path: return False, "", "No active workspace."
         # This will now use the manual clean method directly, not colcon clean via script

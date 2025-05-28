@@ -161,7 +161,14 @@ class MainWindow(QMainWindow):
         self.contextual_view_placeholder = QLabel("Contextual View (Placeholder)")
         self.contextual_view_placeholder.setObjectName("contextualViewPlaceholder")
         self.contextual_view_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
+        # --- Add Section Headers for Explorer and Output ---
+        self.workspace_explorer_header = QLabel("Workspace Explorer")
+        self.workspace_explorer_header.setStyleSheet("color: #b0b0b0; font-size: 15px; font-weight: bold; padding: 8px 0 4px 8px;")
+        self.contextual_view_placeholder.setText("Contextual View (Coming Soon)")
+        self.contextual_view_placeholder.setStyleSheet("color: #b0b0b0; font-size: 15px; font-weight: 600; padding: 16px;")
+        # --- End UI Initialization ---
+
         # Clear Button (created here, placed in _create_central_widget)
         self.clear_output_button = QToolButton()
         self.clear_output_button.setText("Clear")
@@ -186,6 +193,91 @@ class MainWindow(QMainWindow):
         
         self.update_active_workspace_display() # Initial UI state and explorer update
         logger.info("MainWindow initialized and GUI logging handler set up.")
+
+        # --- Apply Modern Dark Theme (LM Studio-like) ---
+        dark_stylesheet = """
+        QMainWindow {
+            background-color: #23272e;
+            color: #e6e6e6;
+        }
+        QWidget {
+            background-color: #23272e;
+            color: #e6e6e6;
+            font-family: 'Segoe UI', 'Arial', sans-serif;
+            font-size: 13px;
+        }
+        QTreeView, QTableView {
+            background-color: #23272e;
+            alternate-background-color: #262b33;
+            border: 1px solid #353b45;
+            selection-background-color: #3a3f4b;
+            selection-color: #e6e6e6;
+            show-decoration-selected: 1;
+        }
+        QHeaderView::section {
+            background-color: #23272e;
+            color: #b0b0b0;
+            border: none;
+            font-weight: bold;
+        }
+        QToolBar {
+            background: #23272e;
+            border-bottom: 1px solid #353b45;
+            spacing: 8px;
+        }
+        QToolButton {
+            background: #2c313a;
+            color: #e6e6e6;
+            border-radius: 6px;
+            padding: 6px 12px;
+            margin: 2px;
+        }
+        QToolButton:hover {
+            background: #353b45;
+        }
+        QStatusBar {
+            background: #23272e;
+            color: #b0b0b0;
+            border-top: 1px solid #353b45;
+        }
+        QMenuBar {
+            background: #23272e;
+            color: #e6e6e6;
+        }
+        QMenuBar::item:selected {
+            background: #353b45;
+        }
+        QMenu {
+            background: #23272e;
+            color: #e6e6e6;
+        }
+        QMenu::item:selected {
+            background: #353b45;
+        }
+        QLabel#contextualViewPlaceholder {
+            color: #b0b0b0;
+            font-size: 15px;
+            font-weight: 600;
+            padding: 16px;
+        }
+        QTextEdit, QPlainTextEdit {
+            background: #181a20;
+            color: #e6e6e6;
+            border: 1px solid #353b45;
+            font-family: 'Fira Mono', 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            border-radius: 6px;
+            padding: 8px;
+        }
+        QSplitter::handle {
+            background: #353b45;
+        }
+        QMessageBox {
+            background-color: #23272e;
+            color: #e6e6e6;
+        }
+        """
+        self.setStyleSheet(dark_stylesheet)
 
     def _create_actions(self):
         style = self.style()
@@ -357,6 +449,29 @@ class MainWindow(QMainWindow):
         self.horizontal_splitter_right.setOpaqueResize(False)
         logger.debug(f"_create_central_widget: Method END. Splitter children count: {self.vertical_splitter.count()}") # <-- ADD THIS LINE
 
+        # Add workspace explorer header above the tree view
+        explorer_vbox = QVBoxLayout()
+        explorer_vbox.setContentsMargins(0,0,0,0)
+        explorer_vbox.setSpacing(0)
+        explorer_widget = QWidget()
+        explorer_widget.setLayout(explorer_vbox)
+        explorer_vbox.addWidget(self.workspace_explorer_header)
+        explorer_vbox.addWidget(self.workspace_explorer_view)
+        self.vertical_splitter.addWidget(explorer_widget)
+
+        # Output area: add a header above output display
+        output_header = QLabel("Output Console")
+        output_header.setStyleSheet("color: #b0b0b0; font-size: 15px; font-weight: bold; padding: 8px 0 4px 8px;")
+        output_pane_layout.insertWidget(0, output_header)
+
+        # Add some spacing and padding to layouts for a modern look
+        main_hbox_layout.setSpacing(0)
+        main_hbox_layout.setContentsMargins(0,0,0,0)
+        right_pane_vbox_layout.setSpacing(0)
+        right_pane_vbox_layout.setContentsMargins(0,0,0,0)
+        output_pane_layout.setSpacing(6)
+        output_pane_layout.setContentsMargins(8,8,8,8)
+
     def update_active_workspace_display(self, action_description: Optional[str] = None):
         logger.debug(f"update_active_workspace_display called. Current action_desc: '{self.current_action_description}', New event_desc: '{action_description}'") # <-- ADD THIS LINE
         workspace_path = self.workspace_manager.get_active_workspace_path()
@@ -423,8 +538,8 @@ class MainWindow(QMainWindow):
         
         # --- Conditionally update workspace explorer ---
         current_ws_in_explorer_text = ""
-        if self.workspace_tree_model.rowCount() > 0:
-            item = self.workspace_tree_model.item(0, 0) # Get the root item
+        if self.workspace_explorer_model.rowCount() > 0:
+            item = self.workspace_explorer_model.item(0, 0) # Get the root item
             if item: # Check if item is not None
                 current_ws_in_explorer_text = item.text()
         logger.debug(f"Explorer update check: is_ws_active={is_ws_active}, current_explorer_text='{current_ws_in_explorer_text}', current_ws_name='{workspace_path.name if workspace_path else 'None'}'")
@@ -506,12 +621,12 @@ class MainWindow(QMainWindow):
                 ws_root_item.appendRow(no_packages_item)
                 logger.info("Workspace explorer: Added 'No packages found in src/' under workspace node.")
             
-            self.workspace_tree_view.expand(ws_root_item.index()) # Expand the workspace root item
+            self.workspace_explorer_view.expand(ws_root_item.index()) # Expand the workspace root item
         except Exception as e:
             error_msg = f"Error during package discovery or populating tree: {e}"
             logger.error(error_msg, exc_info=True)
             if self.output_display: self.output_display.append_text(f"[ERROR] {error_msg}")
-            error_item = QStandardItem(error_item_icon, "Error loading packages")
+            error_item = QStandardItem("Error loading packages")
             error_item.setEditable(False)
             if ws_root_item: ws_root_item.appendRow(error_item) # Check if ws_root_item exists
             
