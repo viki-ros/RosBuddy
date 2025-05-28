@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+rosbuddy_env/
+venv/
+env/
+ENV/
+lib/
+lib64/
+include/
+share/python-wheels/
+pip-wheel-metadata/
+
+# IDE specific
+.vscode/
+.idea/
+*.DS_Store
+
+# ROS 2 Build artifacts
+build/
+install/
+log/ # Note: ROSBuddy's `ToolInvoker` cleans this. If you want to commit the dir structure, adjust.
+
+# Our custom log files for ROSBuddy stdout/stderr
+logs/
+
+# Distribution / Packaging
+dist/
+*.egg-info/
+*.egg
+
+# Other
+*.swp
+*~

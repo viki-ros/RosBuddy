@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>my_cmake_test_pkg</name>
+  <version>0.5.0</version>
+  <description>A CMake package to test CMakeLists.txt generation.</description>
+  <maintainer email="cmake.builder@example.com">CMake Builder</maintainer>
+  <license>Boost Software License 1.0</license>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <build_depend>sensor_msgs</build_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <depend>tf2_ros</depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_type>ament_cmake</build_type>
+<test_depend>ament_copyright</test_depend>
+<test_depend>ament_flake8</test_depend>
+<test_depend>ament_pep257</test_depend>
+<test_depend>python3-pytest</test_depend>
+</package>
