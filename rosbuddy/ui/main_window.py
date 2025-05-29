@@ -13,10 +13,13 @@ from PyQt6.QtWidgets import (
     QStyle, # For standard icons
     QTreeView # For Workspace Explorer
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QModelIndex
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QModelIndex, QByteArray
 # Typing imports
 from typing import Optional, List, Dict, Any, Callable # Ensure all common types are here
-from PyQt6.QtGui import QAction, QIcon, QStandardItemModel, QStandardItem
+from PyQt6.QtGui import QAction, QIcon, QStandardItemModel, QStandardItem, QKeySequence
+
+# Project imports
+from rosbuddy.utils.icon_manager import IconManager
  
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -31,8 +34,10 @@ from rosbuddy.ui.components.worker import Worker, WorkerSignals
 from rosbuddy.ui.dialogs.node_creator_dialog import NodeCreatorDialog
 from rosbuddy.ui.dialogs.launch_file_composer_dialog import LaunchFileComposerDialog
 from rosbuddy.ui.dialogs.msg_srv_action_editor_dialog import MsgSrvActionEditorDialog
-from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog
-from rosbuddy.ui.views import SettingsView, AIAssistantView, CodeEditorView # Import new views
+from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog # Import new views
+from rosbuddy.ui.views import (SettingsView, AIAssistantView, CodeEditorView, WelcomeView,
+                               NodeWizardView, LaunchRunnerView, DebugView, RosGraphInspectorView,
+                               RosDoctorView, AIAgentActionView)
 
 # --- Custom Logging Handler ---
 class QtLogSignal(QObject):
@@ -112,15 +117,24 @@ class MainWindow(QMainWindow):
         self.last_maint_name: str = "ROS User"
         self.last_maint_email: str = "user@example.com"
 
+        # Initialize IconManager before creating actions
+        self.icon_manager = IconManager(self.style())
+
         # --- Modular UI Components ---
         self.workspace_explorer = WorkspaceExplorer(self.package_discovery, self.workspace_manager)
-        self.workspace_explorer.doubleClicked.connect(self._on_explorer_item_double_clicked)
+        self.workspace_explorer.doubleClicked.connect(self._on_explorer_item_double_clicked) # Reverted to standard QTreeView signal
         self.output_panel = OutputPanel()
         # self.contextual_view_placeholder = ContextualViewPlaceholder() # Will be replaced by QTabWidget
         self.active_view_tabs = QTabWidget()
         self.active_view_tabs.setTabsClosable(True)
         self.active_view_tabs.tabCloseRequested.connect(self.on_close_tab)
         self.active_view_tabs.currentChanged.connect(self.on_active_tab_changed)
+
+        # Placeholder for when no tabs are open (as per report)
+        self._empty_tab_placeholder = QLabel("Open a file from the Workspace Explorer or use an action from the sidebar.")
+        self._empty_tab_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_tab_placeholder.setStyleSheet("font-style: italic; color: #888; font-size: 14px; padding: 20px;")
+        self._empty_tab_placeholder.setWordWrap(True)
 
         # Map unique view IDs to their corresponding sidebar actions that open them
         self.sidebar_view_action_map: Dict[str, QAction] = {} # Initialize as empty, populated in _create_actions
@@ -147,11 +161,8 @@ class MainWindow(QMainWindow):
         
         self.update_active_workspace_display()
         logger.info("MainWindow initialized and GUI logging handler set up.")
-
-        # Add a placeholder tab
-        welcome_widget = QLabel("Welcome to ROSBuddy!\nSelect an item from the Workspace Explorer or use the sidebar.")
-        welcome_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.active_view_tabs.addTab(welcome_widget, "Welcome")
+        self._open_initial_view() # Open WelcomeView or show placeholder
+        self._update_empty_tab_placeholder_visibility() # Initial check
 
 
         # --- Apply Modern Dark Theme (LM Studio-like) ---
@@ -280,24 +291,45 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(dark_stylesheet)
 
     @property
+    def active_tab_unique_id(self) -> Optional[str]:
+        current_widget = self.active_view_tabs.currentWidget()
+        if current_widget and hasattr(current_widget, 'rosbuddy_tab_id'):
+            return current_widget.rosbuddy_tab_id
+        return None
+
+
+    @property
     def output_display(self) -> QTextEdit: # Convenience property
         return self.output_panel.output_display
 
 
     def _create_actions(self):
-        style = self.style()
+        """Creates all QActions used in menus and toolbars."""
+        # Main toolbar and menu actions
+        icon_new_ws = self.icon_manager.get_icon("document-new", QStyle.StandardPixmap.SP_FileIcon)
+        icon_open_ws = self.icon_manager.get_icon("document-open", QStyle.StandardPixmap.SP_DirIcon)
+        icon_exit = self.icon_manager.get_icon("application-exit", QStyle.StandardPixmap.SP_DialogCloseButton)
+        icon_create_pkg = self.icon_manager.get_icon("package-x-generic", QStyle.StandardPixmap.SP_DirIcon)
+        icon_build = self.icon_manager.get_icon("system-run", QStyle.StandardPixmap.SP_MediaPlay)
+        icon_clean = self.icon_manager.get_icon("edit-clear", QStyle.StandardPixmap.SP_TrashIcon)
+        icon_run_exec = self.icon_manager.get_icon("utilities-terminal", QStyle.StandardPixmap.SP_CommandLink)
+        icon_launch = self.icon_manager.get_icon("system-launch", QStyle.StandardPixmap.SP_MediaPlay)
+        icon_stop = self.icon_manager.get_icon("process-stop", QStyle.StandardPixmap.SP_MediaStop)
+        icon_refresh = self.icon_manager.get_icon("view-refresh", QStyle.StandardPixmap.SP_BrowserReload)
 
-        icon_new_ws = QIcon.fromTheme("document-new", style.standardIcon(QStyle.StandardPixmap.SP_FileIcon))
-        icon_open_ws = QIcon.fromTheme("document-open", style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        icon_exit = QIcon.fromTheme("application-exit", style.standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
-        icon_create_pkg = QIcon.fromTheme("package-x-generic", QIcon()) # Using a generic package icon
-        icon_build = QIcon.fromTheme("system-run", style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay)) # SP_DialogApplyButton or SP_MediaPlay
-        icon_clean = QIcon.fromTheme("edit-clear", style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-        icon_run_exec = QIcon.fromTheme("utilities-terminal", style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)) # Changed placeholder
-        icon_launch = QIcon.fromTheme("application-x-executable", style.standardIcon(QStyle.StandardPixmap.SP_ArrowRight)) # Changed placeholder
-        icon_stop = QIcon.fromTheme("process-stop", style.standardIcon(QStyle.StandardPixmap.SP_MediaStop))
-        icon_refresh = QIcon.fromTheme("view-refresh", style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        # Sidebar icons
+        icon_explorer = self.icon_manager.get_icon("folder", QStyle.StandardPixmap.SP_DirIcon)
+        icon_settings = self.icon_manager.get_icon("preferences-system", QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        icon_ai = self.icon_manager.get_icon("ai-assistant", QStyle.StandardPixmap.SP_MessageBoxQuestion)
+        icon_debug = self.icon_manager.get_icon("debug", QStyle.StandardPixmap.SP_MessageBoxQuestion)
+        icon_node = self.icon_manager.get_icon("code-node", QStyle.StandardPixmap.SP_FileIcon)
+        icon_graph = self.icon_manager.get_icon("network-graph", QStyle.StandardPixmap.SP_DriveNetIcon)
+        icon_launch_runner = self.icon_manager.get_icon("launch-runner", QStyle.StandardPixmap.SP_MediaPlay)
+        icon_agent = self.icon_manager.get_icon("ai-agent", QStyle.StandardPixmap.SP_CommandLink)
+        icon_doctor = self.icon_manager.get_icon("ros-doctor", QStyle.StandardPixmap.SP_DialogHelpButton)
+        icon_omni_search = self.icon_manager.get_icon("edit-find", QStyle.StandardPixmap.SP_FileDialogContentsView)
 
+        # Create main toolbar/menu actions
         self.new_workspace_action = QAction(icon_new_ws, "&New Workspace...", self)
         self.new_workspace_action.triggered.connect(self.on_new_workspace)
         self.open_workspace_action = QAction(icon_open_ws, "&Open Workspace...", self)
@@ -305,6 +337,7 @@ class MainWindow(QMainWindow):
         self.exit_action = QAction(icon_exit, "&Exit", self)
         self.exit_action.triggered.connect(self.close)
 
+        # Create Workspace Actions
         self.create_package_action = QAction(icon_create_pkg, "&Create New Package...", self)
         self.create_package_action.triggered.connect(self.on_create_package)
         self.build_workspace_action = QAction(icon_build, "&Build Workspace", self)
@@ -317,45 +350,74 @@ class MainWindow(QMainWindow):
         self.launch_file_action.triggered.connect(self.on_launch_file)
         self.stop_task_action = QAction(icon_stop, "&Stop Current Task", self)
         self.stop_task_action.triggered.connect(self.on_stop_task)
-        
         self.refresh_workspace_action = QAction(icon_refresh, "&Refresh Workspace Explorer", self)
-        self.refresh_workspace_action.setStatusTip("Reload the list of packages from the current workspace")
         self.refresh_workspace_action.triggered.connect(self.on_refresh_workspace_explorer)
 
-        self.new_node_action = QAction("New Node...", self)
-        self.new_node_action.triggered.connect(self.on_new_node)
-        self.new_launch_action = QAction("New Launch File...", self)
-        self.new_launch_action.triggered.connect(self.on_new_launch_file)
-        self.new_msg_srv_action = QAction("New Msg/Srv/Action...", self)
-        self.new_msg_srv_action.triggered.connect(self.on_new_msg_srv_action)
-        self.edit_pkg_config_action = QAction("Edit package.xml/CMakeLists.txt...", self)
-        self.edit_pkg_config_action.triggered.connect(self.on_edit_pkg_config)
-
-        # --- Sidebar Actions (can reuse some or create new ones) ---
-        # For now, let's create a few distinct ones for demonstration
-        icon_explorer = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-        icon_settings = style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView) # Placeholder
-        icon_ai_assistant = QIcon.fromTheme("preferences-desktop-ai-assistant", QIcon()) # Placeholder, needs actual icon
-
+        # Create Sidebar Actions
         self.sidebar_explorer_action = QAction(icon_explorer, "Explorer", self)
         self.sidebar_explorer_action.triggered.connect(self.on_sidebar_explorer)
-        
+        self.sidebar_explorer_action.setCheckable(True)
+
         self.sidebar_settings_action = QAction(icon_settings, "Settings", self)
         self.sidebar_settings_action.triggered.connect(self.on_sidebar_settings)
+        self.sidebar_settings_action.setCheckable(True)
 
-        self.sidebar_ai_action = QAction(icon_ai_assistant, "AI Assistant", self)
-        self.sidebar_ai_action.triggered.connect(self.on_sidebar_ai_assistant)
+        self.sidebar_ai_assistant_action = QAction(icon_ai, "AI Assistant", self)
+        self.sidebar_ai_assistant_action.triggered.connect(self.on_sidebar_ai_assistant)
+        self.sidebar_ai_assistant_action.setCheckable(True)
 
-        # Update the map now that actions are created
+        self.sidebar_node_wizard_action = QAction(icon_node, "Node Wizard", self)
+        self.sidebar_node_wizard_action.triggered.connect(self.on_sidebar_node_wizard)
+        self.sidebar_node_wizard_action.setCheckable(True)
+
+        self.sidebar_debug_view_action = QAction(icon_debug, "Debug View", self)  # Add the missing action
+        self.sidebar_debug_view_action.triggered.connect(self.on_sidebar_debug_view)
+        self.sidebar_debug_view_action.setCheckable(True)
+
+        self.sidebar_launch_runner_action = QAction(icon_launch_runner, "Launch Runner", self)
+        self.sidebar_launch_runner_action.triggered.connect(self.on_sidebar_launch_runner)
+        self.sidebar_launch_runner_action.setCheckable(True)
+
+        self.sidebar_ros_graph_action = QAction(icon_graph, "ROS Graph", self)
+        self.sidebar_ros_graph_action.triggered.connect(self.on_sidebar_ros_graph)
+        self.sidebar_ros_graph_action.setCheckable(True)
+
+        self.sidebar_ai_agent_action = QAction(icon_agent, "AI Agent Actions", self)
+        self.sidebar_ai_agent_action.triggered.connect(self.on_sidebar_ai_agent_actions)
+        self.sidebar_ai_agent_action.setCheckable(True)
+
+        self.sidebar_ros_doctor_action = QAction(icon_doctor, "ROS Doctor", self)
+        self.sidebar_ros_doctor_action.triggered.connect(self.on_sidebar_ros_doctor)
+        self.sidebar_ros_doctor_action.setCheckable(True)
+
+        # Omni-search action
+        self.omni_search_action = QAction(icon_omni_search, "Quick Search", self)
+        self.omni_search_action.triggered.connect(self.on_omni_search_triggered)
+        self.omni_search_action.setShortcut(QKeySequence(Qt.Key.Key_K | Qt.KeyboardModifier.ControlModifier))
+
+        # Asset Creation Actions
+        self.new_node_action = QAction(icon_node, "New Node...", self)
+        self.new_node_action.triggered.connect(self.on_new_node)
+        self.new_launch_action = QAction(icon_launch, "New Launch File...", self)
+        self.new_launch_action.triggered.connect(self.on_new_launch_file)
+        self.new_msg_srv_action = QAction(icon_create_pkg, "New Msg/Srv/Action...", self)
+        self.new_msg_srv_action.triggered.connect(self.on_new_msg_srv_action)
+        self.edit_pkg_config_action = QAction(icon_settings, "Edit package.xml/CMakeLists.txt...", self)
+        self.edit_pkg_config_action.triggered.connect(self.on_edit_pkg_config)
+
+        # Map sidebar actions to their unique IDs for active state management
         self.sidebar_view_action_map = {
             "rosbuddy_settings_view": self.sidebar_settings_action,
-            "rosbuddy_ai_assistant_view": self.sidebar_ai_action,
+            "rosbuddy_ai_assistant_view": self.sidebar_ai_assistant_action,
+            "rosbuddy_node_wizard_view": self.sidebar_node_wizard_action,
+            "rosbuddy_launch_runner_view": self.sidebar_launch_runner_action,
+            "rosbuddy_ros_graph_view": self.sidebar_ros_graph_action,
+            "rosbuddy_debug_view": self.sidebar_debug_view_action,
+            "rosbuddy_ai_agent_actions_view": self.sidebar_ai_agent_action,
+            "rosbuddy_ros_doctor_view": self.sidebar_ros_doctor_action,
         }
 
-        # Set initial enabled states directly or rely on first update_active_workspace_display
-        # For clarity, we'll let update_active_workspace_display handle all dynamic enabling.
-        # The actions that depend on workspace or busy state are initially disabled by default
-        # if not explicitly setEnabled(True) here and no workspace is active.
+        # Set initial enabled states
         self.create_package_action.setEnabled(False)
         self.build_workspace_action.setEnabled(False)
         self.clean_workspace_action.setEnabled(False)
@@ -363,6 +425,14 @@ class MainWindow(QMainWindow):
         self.launch_file_action.setEnabled(False)
         self.stop_task_action.setEnabled(False)
         self.refresh_workspace_action.setEnabled(False)
+        
+        # Omni-Search Action (for toolbar)
+        icon_omni_search = QIcon.fromTheme("edit-find", self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        self.omni_search_action = QAction(icon_omni_search, "Omni-Search (Ctrl+K)...", self)
+        self.omni_search_action.setShortcut(QKeySequence(Qt.Key.Key_K | Qt.KeyboardModifier.ControlModifier))
+        self.omni_search_action.triggered.connect(self.on_omni_search_triggered)
+        self.omni_search_action.setToolTip("Coming Soon: Search files, commands, etc.")
+
 
     def _create_menu_bar(self):
         menu_bar = self.menuBar()
@@ -413,6 +483,7 @@ class MainWindow(QMainWindow):
         self.tool_bar.addAction(self.run_executable_action)
         self.tool_bar.addAction(self.launch_file_action)
         self.tool_bar.addAction(self.stop_task_action)
+        self.tool_bar.addAction(self.omni_search_action) # Add Omni-Search to toolbar
         self.tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
     def _create_sidebar(self):
@@ -424,17 +495,29 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.sidebar_tool_bar)
 
         # Add sidebar actions
-        self.sidebar_tool_bar.addAction(self.sidebar_explorer_action) # Example
-        # Add more actions as they are defined and implemented
+        self.sidebar_tool_bar.addAction(self.sidebar_explorer_action)
+        self.sidebar_tool_bar.addAction(self.sidebar_node_wizard_action)
+        self.sidebar_tool_bar.addAction(self.sidebar_launch_runner_action)
+        self.sidebar_tool_bar.addAction(self.sidebar_ros_graph_action)
+        self.sidebar_tool_bar.addAction(self.sidebar_debug_view_action)
         self.sidebar_tool_bar.addSeparator()
+        self.sidebar_tool_bar.addAction(self.sidebar_ai_assistant_action)
+        self.sidebar_tool_bar.addAction(self.sidebar_ai_agent_action)
+        self.sidebar_tool_bar.addSeparator()
+        self.sidebar_tool_bar.addAction(self.sidebar_ros_doctor_action)
         self.sidebar_tool_bar.addAction(self.sidebar_settings_action)
-        self.sidebar_tool_bar.addAction(self.sidebar_ai_action)
 
     def _create_status_bar(self):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.active_ws_label = QLabel("Active Workspace: None")
         self.status_bar.addPermanentWidget(self.active_ws_label)
+
+        # AI Assistant Status (as per report)
+        self.ai_status_label = QLabel("◉ AI Assistant [Online]") # Default
+        self.ai_status_label.setStyleSheet("color: lightgreen; margin-left: 10px; margin-right: 5px;")
+        self.status_bar.addPermanentWidget(self.ai_status_label)
+
         # Initial message will be set by update_active_workspace_display
 
     def _create_central_widget(self):
@@ -459,8 +542,14 @@ class MainWindow(QMainWindow):
         right_primary_pane_layout.setContentsMargins(0, 0, 0, 0)
         right_primary_pane_layout.setSpacing(0) # No spacing between tabs and output
 
-        # Active View Tabs (takes most space)
-        right_primary_pane_layout.addWidget(self.active_view_tabs, 1) # Stretch factor 1
+        # Container for tab widget and empty placeholder (to toggle visibility)
+        self.tab_area_container = QWidget()
+        self.tab_area_layout = QVBoxLayout(self.tab_area_container) # Or QStackedLayout
+        self.tab_area_layout.setContentsMargins(0,0,0,0)
+        self.tab_area_layout.addWidget(self.active_view_tabs)
+        self.tab_area_layout.addWidget(self._empty_tab_placeholder)
+        self._empty_tab_placeholder.hide() # Initially hidden
+        right_primary_pane_layout.addWidget(self.tab_area_container, 1) # Stretch factor 1
 
         # Output Panel (below active view tabs)
         right_primary_pane_layout.addWidget(self.output_panel, 0) # Stretch factor 0 (or smaller)
@@ -471,6 +560,14 @@ class MainWindow(QMainWindow):
 
         logger.debug(f"_create_central_widget: Method END. Splitter children count: {self.main_splitter.count()}")
         main_hbox_layout.setSpacing(0)
+
+    def _update_empty_tab_placeholder_visibility(self):
+        if self.active_view_tabs.count() == 0:
+            self.active_view_tabs.hide()
+            self._empty_tab_placeholder.show()
+        else:
+            self._empty_tab_placeholder.hide()
+            self.active_view_tabs.show()
 
     def update_active_workspace_display(self, action_description: Optional[str] = None):
         logger.debug(f"update_active_workspace_display called. Current action_desc: '{self.current_action_description}', New event_desc: '{action_description}'") # <-- ADD THIS LINE
@@ -653,6 +750,13 @@ class MainWindow(QMainWindow):
         # This action might toggle visibility or focus of the workspace explorer
         # For now, just a message.
         self.output_display.append_text("[INFO] Sidebar: Explorer (currently focuses main window)")
+        # Ensure explorer button is visually "active" and others are not (if explorer is not a tab)
+        for action_unique_id, action_object in self.sidebar_view_action_map.items():
+            button = self.sidebar_tool_bar.widgetForAction(action_object)
+            if button: self._set_sidebar_button_active_state(button, False)
+        
+        explorer_button = self.sidebar_tool_bar.widgetForAction(self.sidebar_explorer_action)
+        if explorer_button: self._set_sidebar_button_active_state(explorer_button, True)
         self.workspace_explorer.setFocus()
 
     def _add_or_focus_tab(self, view_widget: QWidget, tab_title: str, tab_icon: Optional[QIcon] = None, unique_id: Optional[str] = None):
@@ -683,6 +787,7 @@ class MainWindow(QMainWindow):
         
         self.active_view_tabs.setCurrentIndex(index)
         logger.info(f"Opened new tab: '{tab_title}' (ID: {unique_id}) at index {index}")
+        self._update_empty_tab_placeholder_visibility() # Hide placeholder if this is the first tab
         return view_widget # Return the new widget
 
     def on_sidebar_settings(self):
@@ -704,6 +809,61 @@ class MainWindow(QMainWindow):
             # tab_icon=QIcon.fromTheme("preferences-desktop-ai-assistant"), # If you have a theme icon
             unique_id="rosbuddy_ai_assistant_view"
         )
+
+    def on_sidebar_node_wizard(self):
+        logger.info("Sidebar: Node Wizard action triggered.")
+        view = NodeWizardView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(view, "Node Wizard", unique_id="rosbuddy_node_wizard_view")
+
+    def on_sidebar_launch_runner(self):
+        logger.info("Sidebar: Launch Runner action triggered.")
+        view = LaunchRunnerView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(view, "Launch Runner", unique_id="rosbuddy_launch_runner_view")
+
+    def on_sidebar_ros_graph(self):
+        logger.info("Sidebar: ROS Graph action triggered.")
+        view = RosGraphInspectorView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(view, "ROS Graph", unique_id="rosbuddy_ros_graph_view")
+
+    def on_sidebar_debug_view(self):
+        logger.info("Sidebar: Debug View action triggered.")
+        view = DebugView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(view, "Debug", unique_id="rosbuddy_debug_view")
+
+    def on_sidebar_ai_agent_actions(self):
+        logger.info("Sidebar: AI Agent Actions action triggered.")
+        view = AIAgentActionView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(view, "AI Agent Actions", unique_id="rosbuddy_ai_agent_actions_view")
+
+    def on_sidebar_ros_doctor(self):
+        logger.info("Sidebar: ROS Doctor action triggered.")
+        view = RosDoctorView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(view, "ROS Doctor", unique_id="rosbuddy_ros_doctor_view")
+
+    def _open_initial_view(self):
+        """Opens the WelcomeView as the initial tab."""
+        # Check if any tabs are already open (e.g., from a restored session - future)
+        if self.active_view_tabs.count() == 0:
+            welcome_view = WelcomeView(parent=self.active_view_tabs)
+            # Connect signal from WelcomeView for action card clicks
+            welcome_view.action_card_clicked.connect(self.handle_welcome_action)
+            self._add_or_focus_tab(
+                view_widget=welcome_view,
+                tab_title="Welcome",
+                # tab_icon=QIcon.fromTheme("help-about"), # Example icon
+                unique_id="rosbuddy_welcome_view" # Give it a unique ID
+            )
+    def handle_welcome_action(self, action_id: str):
+        """Handles actions triggered from WelcomeView cards."""
+        logger.info(f"WelcomeView action card clicked: {action_id}")
+        if action_id == "open_workspace": self.on_open_workspace()
+        elif action_id == "new_workspace": self.on_new_workspace()
+        elif action_id == "create_package": self.on_create_package()
+        elif action_id == "ai_assistant": self.on_sidebar_ai_assistant()
+        elif action_id == "settings": self.on_sidebar_settings()
+        elif action_id == "launch_runner": self.on_sidebar_launch_runner()
+        # Add more cases for other actions from WelcomeView
+
 
     def _on_explorer_item_double_clicked(self, index: QModelIndex):
         item = self.workspace_explorer.model.itemFromIndex(index)
@@ -755,31 +915,41 @@ class MainWindow(QMainWindow):
         Updates the active state of sidebar buttons.
         """
         logger.debug(f"Active tab changed to index: {index}")
-        current_tab_widget = self.active_view_tabs.widget(index)
-        active_tab_id = None
-
-        if current_tab_widget and hasattr(current_tab_widget, 'rosbuddy_tab_id'):
-            active_tab_id = current_tab_widget.rosbuddy_tab_id
-            logger.debug(f"Current active tab ID: {active_tab_id}")
+        current_active_tab_id = self.active_tab_unique_id # Use the property
+        logger.debug(f"Current active tab ID from property: {current_active_tab_id}")
 
         # Deactivate all mapped sidebar actions first
         for action_unique_id, action_object in self.sidebar_view_action_map.items():
             button = self.sidebar_tool_bar.widgetForAction(action_object)
             if button:
-                is_active = (action_unique_id == active_tab_id)
-                button.setProperty("active", is_active)
-                # logger.debug(f"Setting button for action_id '{action_unique_id}' active: {is_active}")
-                self.style().unpolish(button)
-                self.style().polish(button)
+                is_active = (action_unique_id == current_active_tab_id)
+                self._set_sidebar_button_active_state(button, is_active)
         
         # Special handling for explorer if needed, but it's not a tab.
-        # For now, explorer button state is independent.
+        # Explorer button should be active if no other *sidebar-mapped* tab is active,
+        # or if explicitly clicked.
         explorer_button = self.sidebar_tool_bar.widgetForAction(self.sidebar_explorer_action)
-        if explorer_button: # Ensure it doesn't get stuck in an active state from other logic
-            if not active_tab_id: # If welcome tab or no tabs, ensure explorer isn't falsely active
-                 explorer_button.setProperty("active", False) # Or handle its active state separately
-                 self.style().unpolish(explorer_button)
-                 self.style().polish(explorer_button)
+        if explorer_button:
+            # If no sidebar-mapped tab is active, consider explorer active by default,
+            # unless the WelcomeView is active (if WelcomeView is not sidebar-mapped).
+            # This logic can be complex. For now, explorer is active only on click.
+            # If current_active_tab_id is None (e.g. Welcome tab or Code Editor),
+            # and explorer was the last clicked sidebar item, it should remain active.
+            # This needs a "last_sidebar_action_clicked" state if we want that behavior.
+            # For now, only the active tab's corresponding button is highlighted.
+            # Explorer button is handled by its on_sidebar_explorer.
+            pass
+
+        self._update_empty_tab_placeholder_visibility()
+
+    def _set_sidebar_button_active_state(self, button: QToolButton, active: bool):
+        """Helper to set active property and re-polish a sidebar button."""
+        if button.property("active") == active: # Avoid unnecessary re-polish
+            return
+        button.setProperty("active", active)
+        logger.debug(f"Setting sidebar button '{button.toolTip()}' active: {active}")
+        self.style().unpolish(button)
+        self.style().polish(button)
 
     # --- Action Slots ---
     def on_new_workspace(self):
@@ -1110,6 +1280,11 @@ class MainWindow(QMainWindow):
         self.current_worker = None
         self.update_active_workspace_display(f"Task '{task_desc}' Failed")
 
+    def on_omni_search_triggered(self):
+        logger.info("Omni-Search triggered (mock).")
+        QMessageBox.information(self, "Omni-Search", "Omni-Search (Ctrl+K) is coming soon!")
+
+
     def on_about(self):
         QMessageBox.about(self, "About ROSBuddy", "ROSBuddy v0.1.2\n\nSimplifying ROS 2 Development")
         logger.debug("About dialog shown.")
@@ -1124,10 +1299,16 @@ class MainWindow(QMainWindow):
     def get_ui_state(self):
         """Return a dict with window geometry and splitter state for persistence."""
         state = {
-            'window_geometry': self.saveGeometry().data().hex(),
+            'window_geometry': self.saveGeometry().toHex().data().decode('utf-8'),
         }
         if hasattr(self, 'main_splitter'): # Updated to main_splitter
-            state['splitter_state'] = self.main_splitter.saveState().data().hex()
+            state['splitter_state'] = self.main_splitter.saveState().toHex().data().decode('utf-8')
+        
+        # Save last active workspace
+        active_ws_path = self.workspace_manager.get_active_workspace_path()
+        if active_ws_path:
+            state['last_workspace'] = str(active_ws_path)
+
         return state
 
     def on_close_tab(self, index: int):
@@ -1150,6 +1331,7 @@ class MainWindow(QMainWindow):
             # This is implicitly handled by currentChanged signal firing after removal,
             # which calls on_active_tab_changed.
             widget.deleteLater()
+        self._update_empty_tab_placeholder_visibility() # Show placeholder if last tab closed
     def closeEvent(self, event):
         """Override closeEvent to allow UI state saving from outside."""
         logger.info("Close event received. ROSBuddy shutting down...")

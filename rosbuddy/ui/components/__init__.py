@@ -3,5 +3,6 @@
 from .workspace_explorer import WorkspaceExplorer
 from .output_panel import OutputPanel
 from .contextual_view import ContextualViewPlaceholder
+from .action_card import ActionCard
 
-__all__ = ["WorkspaceExplorer", "OutputPanel", "ContextualViewPlaceholder"]
+__all__ = ["WorkspaceExplorer", "OutputPanel", "ContextualViewPlaceholder", "ActionCard"]

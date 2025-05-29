@@ -3,7 +3,7 @@ import pathlib
 import logging
 from typing import Optional # Added Optional for type hinting
 from PyQt6.QtWidgets import ( QStyle, # Added QStyle
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox, QToolButton, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QPalette, QColor
@@ -57,6 +57,25 @@ class CodeEditorView(BaseView):
         self.file_path_label.setStyleSheet("font-style: italic; color: #aaa;")
         header_layout.addWidget(self.file_path_label, 1) # Stretch
 
+        # AI Action Buttons (as QToolButton for icons)
+        self.ai_explain_button = QToolButton(self)
+        self.ai_explain_button.setText("📄➡️🧠") # Placeholder, use QIcon
+        self.ai_explain_button.setToolTip("AI: Explain Code")
+        self.ai_explain_button.clicked.connect(self.on_ai_explain)
+        header_layout.addWidget(self.ai_explain_button)
+
+        self.ai_optimize_button = QToolButton(self)
+        self.ai_optimize_button.setText("⚡")
+        self.ai_optimize_button.setToolTip("AI: Optimize Code")
+        self.ai_optimize_button.clicked.connect(self.on_ai_optimize)
+        header_layout.addWidget(self.ai_optimize_button)
+
+        self.ai_docstring_button = QToolButton(self)
+        self.ai_docstring_button.setText("✍️")
+        self.ai_docstring_button.setToolTip("AI: Generate Docstring")
+        self.ai_docstring_button.clicked.connect(self.on_ai_docstring)
+        header_layout.addWidget(self.ai_docstring_button)
+
         self.save_button = QPushButton("Save")
         self.save_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
         self.save_button.clicked.connect(self.save_file)
@@ -73,9 +92,17 @@ class CodeEditorView(BaseView):
             font.setFamily("Monospace")
         self.code_area.setFont(font)
         self.code_area.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap) # Common for code
+        self.code_area.cursorPositionChanged.connect(self._update_status_label)
         self.code_area.textChanged.connect(self._on_text_changed)
         main_view_layout.addWidget(self.code_area, 1) # Stretch
         # No self.setLayout() here, as we are modifying the layout already set by BaseView.
+
+        # Footer (mock)
+        footer_layout = QHBoxLayout()
+        self.status_label = QLabel("Ln 1, Col 1 | Python (mock)")
+        self.status_label.setStyleSheet("font-size: 10pt; color: #999;")
+        footer_layout.addWidget(self.status_label)
+        main_view_layout.addLayout(footer_layout)
 
     def get_file_path(self) -> Optional[pathlib.Path]:
         return self._file_path
@@ -105,6 +132,11 @@ class CodeEditorView(BaseView):
     def _on_text_changed(self):
         if not self.is_dirty(): # Only set dirty if it wasn't already (e.g. during load)
             self._set_dirty(True)
+        # self._update_status_label() # Cursor position change handles this better for Ln/Col
+
+    def _update_status_label(self):
+        cursor = self.code_area.textCursor()
+        self.status_label.setText(f"Ln {cursor.blockNumber() + 1}, Col {cursor.columnNumber() + 1} | Python (mock)")
 
     def load_file(self, file_path: pathlib.Path) -> bool:
         self._file_path = file_path.resolve()
@@ -118,6 +150,7 @@ class CodeEditorView(BaseView):
             
             self.file_path_label.setText(str(self._file_path))
             super().set_view_title(self._file_path.name) # Update BaseView title
+            self._update_status_label() # Update for new content
             logger.info(f"File loaded into editor: {self._file_path}")
             return True
         except Exception as e:
@@ -174,6 +207,19 @@ class CodeEditorView(BaseView):
                 return False # User cancelled closing
             # If Discard, proceed to close
         return True
+
+    # --- AI Action Placeholders ---
+    def on_ai_explain(self):
+        QMessageBox.information(self, "AI Action", "Explain code feature coming soon!")
+        logger.info("AI Explain action triggered.")
+
+    def on_ai_optimize(self):
+        QMessageBox.information(self, "AI Action", "Optimize code feature coming soon!")
+        logger.info("AI Optimize action triggered.")
+
+    def on_ai_docstring(self):
+        QMessageBox.information(self, "AI Action", "Generate docstring feature coming soon!")
+        logger.info("AI Docstring action triggered.")
 
 if __name__ == '__main__':
     import sys

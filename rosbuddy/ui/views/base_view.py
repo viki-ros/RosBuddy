@@ -9,15 +9,33 @@ class BaseView(QWidget):
     """
     def __init__(self, view_title: str = "View", parent=None):
         super().__init__(parent)
-        self.view_title = view_title # Could be used for tab identification or internal state
+        self.view_title = view_title
+        self._init_base_layout()
 
-        # Basic layout
-        layout = QVBoxLayout(self)
-        # Placeholder content - subclasses should override or add to this
+    def _init_base_layout(self):
+        # Create the base layout with proper margins
+        self._base_layout = QVBoxLayout(self)
+        self._base_layout.setContentsMargins(10, 10, 10, 10)
+        self._base_layout.setSpacing(10)
+        
+        # Placeholder content - subclasses should call clear_base_layout() first
         self.placeholder_label = QLabel(f"Content for {self.view_title}")
         self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.placeholder_label)
-        # self.setLayout(layout) # Redundant, QVBoxLayout(self) already sets the layout
+        self._base_layout.addWidget(self.placeholder_label)
+
+    def clear_base_layout(self):
+        """Safely clears all widgets from the base layout."""
+        while self._base_layout.count():
+            item = self._base_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # Recursively clear any nested layouts
+                while item.layout().count():
+                    nested_item = item.layout().takeAt(0)
+                    if nested_item.widget():
+                        nested_item.widget().deleteLater()
+        return self._base_layout
 
     def get_view_title(self) -> str:
         return self.view_title
