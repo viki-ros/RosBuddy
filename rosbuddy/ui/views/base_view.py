@@ -17,7 +17,7 @@ class BaseView(QWidget):
         self.placeholder_label = QLabel(f"Content for {self.view_title}")
         self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.placeholder_label)
-        self.setLayout(layout)
+        # self.setLayout(layout) # Redundant, QVBoxLayout(self) already sets the layout
 
     def get_view_title(self) -> str:
         return self.view_title

@@ -2,7 +2,7 @@
 import pathlib
 import logging
 from typing import Optional # Added Optional for type hinting
-from PyQt6.QtWidgets import (
+from PyQt6.QtWidgets import ( QStyle, # Added QStyle
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -31,10 +31,25 @@ class CodeEditorView(BaseView):
             self.load_file(file_path)
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5) # Tighter margins for editor
-        layout.setSpacing(5)
+        # Get the layout set by BaseView.
+        # CodeEditorView will clear BaseView's content and populate this layout.
+        main_view_layout = self.layout()
+        if not main_view_layout:
+            # This should not happen if BaseView's __init__ always sets a layout.
+            # As a fallback, create one if BaseView didn't.
+            main_view_layout = QVBoxLayout(self)
+        else:
+            # Clear any widgets previously added by BaseView (e.g., placeholder_label)
+            while main_view_layout.count():
+                item = main_view_layout.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+                # Note: If BaseView could add sub-layouts, they'd need recursive clearing.
+                # For now, BaseView only adds a single QLabel.
 
+        main_view_layout.setContentsMargins(5, 5, 5, 5) # Tighter margins for editor
+        main_view_layout.setSpacing(5)
         # --- Header (File Path & Save Button) ---
         header_layout = QHBoxLayout()
         self.file_path_label = QLabel("Untitled")
@@ -43,25 +58,24 @@ class CodeEditorView(BaseView):
         header_layout.addWidget(self.file_path_label, 1) # Stretch
 
         self.save_button = QPushButton("Save")
-        self.save_button.setIcon(self.style().standardIcon(Qt.StandardPixmap.SP_DialogSaveButton))
+        self.save_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
         self.save_button.clicked.connect(self.save_file)
         self.save_button.setEnabled(False) # Disabled until dirty
         header_layout.addWidget(self.save_button)
-        layout.addLayout(header_layout)
+        main_view_layout.addLayout(header_layout)
 
         # --- Code Area ---
         self.code_area = QTextEdit()
         self.code_area.setObjectName("codeEditorArea")
         # Use a monospace font
         font = QFont("Fira Mono", 11) # Or Consolas, Monaco, etc.
-        if not QFont.exactMatch(font.family(), font.styleName()): # Fallback if Fira Mono not found
+        if not font.exactMatch(): # Fallback if Fira Mono (or the initially requested font) was not exactly matched
             font.setFamily("Monospace")
         self.code_area.setFont(font)
         self.code_area.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap) # Common for code
         self.code_area.textChanged.connect(self._on_text_changed)
-        layout.addWidget(self.code_area, 1) # Stretch
-
-        self.setLayout(layout)
+        main_view_layout.addWidget(self.code_area, 1) # Stretch
+        # No self.setLayout() here, as we are modifying the layout already set by BaseView.
 
     def get_file_path(self) -> Optional[pathlib.Path]:
         return self._file_path
@@ -124,7 +138,7 @@ class CodeEditorView(BaseView):
 
         try:
             content = self.code_area.toPlainText()
-            with open(self.document_path, 'w', encoding='utf-8') as f: # Typo: should be self._file_path
+            with open(self._file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             self._set_dirty(False)
             logger.info(f"File saved: {self._file_path}")
