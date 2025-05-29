@@ -1,0 +1,121 @@
+/* ROSBuddy Default Dark Theme (consolidated) */
+/* This is the stylesheet previously defined as dark_stylesheet in MainWindow. */
+QMainWindow {
+    background-color: #23272e;
+    color: #e6e6e6;
+}
+QWidget {
+    background-color: #23272e;
+    color: #e6e6e6;
+    font-family: 'Segoe UI', 'Arial', sans-serif;
+    font-size: 13px;
+}
+QTreeView, QTableView {
+    background-color: #23272e;
+    alternate-background-color: #262b33;
+    border: 1px solid #353b45;
+    selection-background-color: #3a3f4b;
+    selection-color: #e6e6e6;
+    show-decoration-selected: 1;
+}
+QHeaderView::section {
+    background-color: #23272e;
+    color: #b0b0b0;
+    border: none;
+    font-weight: bold;
+}
+QToolBar#sidebarToolBar {
+    background: #202429;
+    border-right: 1px solid #353b45;
+}
+QToolBar {
+    background: #23272e;
+    border-bottom: 1px solid #353b45;
+    spacing: 8px;
+}
+QToolButton {
+    background: #2c313a;
+    color: #c0c0c0;
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin: 2px;
+    border: 1px solid #2c313a;
+}
+QToolBar#sidebarToolBar QToolButton {
+    background: transparent;
+    color: #b0b0b0;
+    border: 1px solid transparent;
+    padding: 8px;
+    border-radius: 4px;
+    width: 40px;
+    height: 40px;
+}
+QToolButton:hover {
+    background: #353b45;
+    color: #e6e6e6;
+    border: 1px solid #4a4f5b;
+}
+QToolBar#sidebarToolBar QToolButton[active="true"] {
+    background-color: #353b45;
+    color: #00AEEF;
+    border: 1px solid #4a4f5b;
+}
+QStatusBar {
+    background: #23272e;
+    color: #b0b0b0;
+    border-top: 1px solid #353b45;
+}
+QMenuBar {
+    background: #23272e;
+    color: #e6e6e6;
+}
+QMenuBar::item:selected {
+    background: #353b45;
+}
+QMenu {
+    background: #23272e;
+    color: #e6e6e6;
+}
+QMenu::item:selected {
+    background: #353b45;
+}
+QLabel#contextualViewPlaceholder {
+    color: #b0b0b0;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 16px;
+}
+QTextEdit, QPlainTextEdit {
+    background: #181a20;
+    color: #e6e6e6;
+    border: 1px solid #353b45;
+    font-family: 'Fira Mono', 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+    border-radius: 6px;
+    padding: 8px;
+}
+QSplitter::handle {
+    background: #353b45;
+}
+QTabWidget::pane {
+    border-top: 1px solid #353b45;
+    background: #1e2227;
+}
+QTabBar::tab {
+    background: #23272e;
+    color: #b0b0b0;
+    border: 1px solid #353b45;
+    border-bottom: none;
+    padding: 8px 15px;
+    margin-right: 1px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}
+QTabBar::tab:selected, QTabBar::tab:hover {
+    background: #2c313a;
+    color: #e6e6e6;
+}
+QMessageBox {
+    background-color: #23272e;
+    color: #e6e6e6;
+}

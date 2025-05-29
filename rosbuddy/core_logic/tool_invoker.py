@@ -7,15 +7,39 @@ from typing import Tuple, Optional, List, Dict, Callable
 import shlex
 import tempfile
 import select 
+import logging
 
-ROS2_DISTRO_SETUP_BASH = "/opt/ros/humble/setup.bash" 
+logger_ti = logging.getLogger(__name__)
 
 class ToolInvoker:
-    def __init__(self, workspace_manager: 'WorkspaceManager'):
+    def _get_ros_setup_bash_path(self) -> Optional[str]:
+        ros_distro_env = os.environ.get('ROS_DISTRO')
+        if ros_distro_env:
+            path = f"/opt/ros/{ros_distro_env}/setup.bash"
+            if os.path.exists(path):
+                logger_ti.info(f"Using ROS_DISTRO '{ros_distro_env}': Found setup.bash at {path}")
+                return path
+            else:
+                logger_ti.warning(f"ROS_DISTRO '{ros_distro_env}' is set, but setup.bash not found at {path}")
+        # Fallback: Try common distros
+        common_distros = ["humble", "iron", "jazzy", "rolling", "galactic", "foxy"]
+        for distro in common_distros:
+            path = f"/opt/ros/{distro}/setup.bash"
+            if os.path.exists(path):
+                logger_ti.info(f"Fallback: Found setup.bash for distro '{distro}' at {path}")
+                return path
+        logger_ti.error("Could not automatically determine ROS 2 setup.bash path. "
+                        "Ensure ROS_DISTRO is set, or the path is standard /opt/ros/<distro>/setup.bash.")
+        return None
+
+    def __init__(self, workspace_manager):
         self.workspace_manager = workspace_manager
         self.bash_executable = shutil.which("bash")
         if not self.bash_executable:
-            print("WARNING: 'bash' executable not found.")
+            logger_ti.warning("CRITICAL: 'bash' executable not found.")
+        self.ros_setup_bash_path = self._get_ros_setup_bash_path()
+        if not self.ros_setup_bash_path:
+            logger_ti.warning("ROSBuddy Warning: ROS 2 setup.bash could not be determined. Commands requiring ROS environment may fail.")
 
     # Modified to return (success, full_stdout, full_stderr, process_obj)
     def _execute_bash_c_script(self, 
@@ -130,17 +154,15 @@ class ToolInvoker:
     # _construct_simple_sourced_script is the same as before
     def _construct_simple_sourced_script(self, command_to_execute: str, include_pre_command_debug: bool = False) -> str:
         script_lines = ["set -e"]
-        if os.path.exists(ROS2_DISTRO_SETUP_BASH):
-            script_lines.append(f"source {shlex.quote(ROS2_DISTRO_SETUP_BASH)}")
+        if self.ros_setup_bash_path and os.path.exists(self.ros_setup_bash_path):
+            script_lines.append(f"source {shlex.quote(self.ros_setup_bash_path)}")
         else:
-            print(f"WARNING (build/clean): ROS 2 distro setup file not found: {ROS2_DISTRO_SETUP_BASH}")
-        
+            logger_ti.warning(f"(construct_simple_script) ROS 2 distro setup file not found or not determined: {self.ros_setup_bash_path}")
         if include_pre_command_debug:
             script_lines.append("echo '[INFO] Current directory (colcon build): $(pwd)'")
             script_lines.append("echo '[INFO] colcon list before build:'")
             script_lines.append("colcon list --paths src/* || echo '[INFO] colcon list pre-build failed or no packages'")
-        
-        script_lines.append(f"exec {command_to_execute}") 
+        script_lines.append(f"exec {command_to_execute}")
         return "\n".join(script_lines)
 
     # Modified to return (success, full_stdout, full_stderr, process_obj)
@@ -160,12 +182,12 @@ class ToolInvoker:
         ]
         script_lines.append("echo '[WRAPPER_INFO] Initial AMENT_PREFIX_PATH (before any sourcing): $AMENT_PREFIX_PATH'")
 
-        if os.path.exists(ROS2_DISTRO_SETUP_BASH):
-            script_lines.append(f"echo '[WRAPPER_INFO] Sourcing ROS_DISTRO: {ROS2_DISTRO_SETUP_BASH}'")
-            script_lines.append(f"source {shlex.quote(ROS2_DISTRO_SETUP_BASH)}")
+        if self.ros_setup_bash_path and os.path.exists(self.ros_setup_bash_path):
+            script_lines.append(f"echo '[WRAPPER_INFO] Sourcing ROS_DISTRO: {self.ros_setup_bash_path}'")
+            script_lines.append(f"source {shlex.quote(self.ros_setup_bash_path)}")
             script_lines.append("echo '[WRAPPER_INFO] After ROS_DISTRO source, AMENT_PREFIX_PATH: $AMENT_PREFIX_PATH'")
         else: 
-            script_lines.append(f"echo '[WRAPPER_INFO] WARNING: ROS 2 distro setup file not found: {ROS2_DISTRO_SETUP_BASH}'")
+            script_lines.append(f"echo '[WRAPPER_INFO] WARNING: ROS 2 distro setup file not found or not determined: {self.ros_setup_bash_path}'")
         
         active_ws_path = self.workspace_manager.get_active_workspace_path()
         if active_ws_path:
@@ -279,8 +301,8 @@ class ToolInvoker:
         if not self.bash_executable: return False, "", "Bash not found."
         
         script_lines = ["set -e"]
-        if os.path.exists(ROS2_DISTRO_SETUP_BASH):
-            script_lines.append(f"source {shlex.quote(ROS2_DISTRO_SETUP_BASH)}")
+        if self.ros_setup_bash_path and os.path.exists(self.ros_setup_bash_path):
+            script_lines.append(f"source {shlex.quote(self.ros_setup_bash_path)}")
         
         # Pre-build debug
         script_lines.append("echo '[INFO] Current directory (colcon build): $(pwd)'")
