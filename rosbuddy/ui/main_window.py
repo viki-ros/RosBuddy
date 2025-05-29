@@ -9,11 +9,11 @@ import logging
 
 from PyQt6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QSplitter, QWidget, QLabel, QStatusBar, QMenuBar, QTextEdit,
-    QMessageBox, QFileDialog, QInputDialog, QDialog, QCheckBox, QApplication, QToolButton, QToolBar,
+    QMessageBox, QFileDialog, QInputDialog, QDialog, QCheckBox, QApplication, QToolButton, QToolBar, QTabWidget,
     QStyle, # For standard icons
     QTreeView # For Workspace Explorer
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QModelIndex
 # Typing imports
 from typing import Optional, List, Dict, Any, Callable # Ensure all common types are here
 from PyQt6.QtGui import QAction, QIcon, QStandardItemModel, QStandardItem
@@ -32,6 +32,7 @@ from rosbuddy.ui.dialogs.node_creator_dialog import NodeCreatorDialog
 from rosbuddy.ui.dialogs.launch_file_composer_dialog import LaunchFileComposerDialog
 from rosbuddy.ui.dialogs.msg_srv_action_editor_dialog import MsgSrvActionEditorDialog
 from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog
+from rosbuddy.ui.views import SettingsView, AIAssistantView, CodeEditorView # Import new views
 
 # --- Custom Logging Handler ---
 class QtLogSignal(QObject):
@@ -113,21 +114,29 @@ class MainWindow(QMainWindow):
 
         # --- Modular UI Components ---
         self.workspace_explorer = WorkspaceExplorer(self.package_discovery, self.workspace_manager)
+        self.workspace_explorer.doubleClicked.connect(self._on_explorer_item_double_clicked)
         self.output_panel = OutputPanel()
-        self.contextual_view_placeholder = ContextualViewPlaceholder()
+        # self.contextual_view_placeholder = ContextualViewPlaceholder() # Will be replaced by QTabWidget
+        self.active_view_tabs = QTabWidget()
+        self.active_view_tabs.setTabsClosable(True)
+        self.active_view_tabs.tabCloseRequested.connect(self.on_close_tab)
+        self.active_view_tabs.currentChanged.connect(self.on_active_tab_changed)
+
+        # Map unique view IDs to their corresponding sidebar actions that open them
+        self.sidebar_view_action_map: Dict[str, QAction] = {} # Initialize as empty, populated in _create_actions
 
         # Connect clear button
         self.output_panel.clear_output_button.clicked.connect(self.on_clear_output)
-        self.output_display = self.output_panel.output_display
 
         self._create_actions()
         self._create_menu_bar()
         self._create_tool_bar()
+        self._create_sidebar() # Call _create_sidebar here
         self._create_status_bar()
         self._create_central_widget()
         # Restore splitter state if provided
-        if splitter_state and hasattr(self, 'vertical_splitter'):
-            self.vertical_splitter.restoreState(splitter_state)
+        if splitter_state and hasattr(self, 'main_splitter'): # Updated to main_splitter
+            self.main_splitter.restoreState(splitter_state)
 
         # --- Setup GUI Logging ---
         self.log_signal_emitter = QtLogSignal()
@@ -138,6 +147,12 @@ class MainWindow(QMainWindow):
         
         self.update_active_workspace_display()
         logger.info("MainWindow initialized and GUI logging handler set up.")
+
+        # Add a placeholder tab
+        welcome_widget = QLabel("Welcome to ROSBuddy!\nSelect an item from the Workspace Explorer or use the sidebar.")
+        welcome_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.active_view_tabs.addTab(welcome_widget, "Welcome")
+
 
         # --- Apply Modern Dark Theme (LM Studio-like) ---
         dark_stylesheet = """
@@ -165,6 +180,10 @@ class MainWindow(QMainWindow):
             border: none;
             font-weight: bold;
         }
+        QToolBar#sidebarToolBar { /* Sidebar specific styling */
+            background: #202429; /* Slightly different dark */
+            border-right: 1px solid #353b45;
+        }
         QToolBar {
             background: #23272e;
             border-bottom: 1px solid #353b45;
@@ -172,13 +191,30 @@ class MainWindow(QMainWindow):
         }
         QToolButton {
             background: #2c313a;
-            color: #e6e6e6;
+            color: #c0c0c0; /* Slightly less bright for inactive */
             border-radius: 6px;
             padding: 6px 12px;
             margin: 2px;
+            border: 1px solid #2c313a; /* Ensure border for consistent size */
+        }
+        QToolBar#sidebarToolBar QToolButton { /* Sidebar buttons */
+            background: transparent;
+            color: #b0b0b0;
+            border: 1px solid transparent;
+            padding: 8px;
+            border-radius: 4px;
+            width: 40px; /* Fixed width for sidebar buttons */
+            height: 40px; /* Fixed height for sidebar buttons */
         }
         QToolButton:hover {
             background: #353b45;
+            color: #e6e6e6;
+            border: 1px solid #4a4f5b;
+        }
+        QToolBar#sidebarToolBar QToolButton[active="true"] {
+            background-color: #353b45; /* Simulates ros-dark-border */
+            color: #00AEEF; /* A bright blue, similar to a primary accent */
+            border: 1px solid #4a4f5b; /* Consistent with hover border or slightly more prominent */
         }
         QStatusBar {
             background: #23272e;
@@ -217,12 +253,36 @@ class MainWindow(QMainWindow):
         QSplitter::handle {
             background: #353b45;
         }
+        QTabWidget::pane {
+            border-top: 1px solid #353b45;
+            background: #1e2227; /* Darker background for tab content area */
+        }
+        QTabBar::tab {
+            background: #23272e;
+            color: #b0b0b0;
+            border: 1px solid #353b45;
+            border-bottom: none; /* As pane has top border */
+            padding: 8px 15px;
+            margin-right: 1px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+        QTabBar::tab:selected, QTabBar::tab:hover {
+            background: #2c313a; /* Slightly lighter for selected/hover */
+            color: #e6e6e6;
+        }
+        /* Add more specific styling for QTabBar::close-button if needed */
         QMessageBox {
             background-color: #23272e;
             color: #e6e6e6;
         }
         """
         self.setStyleSheet(dark_stylesheet)
+
+    @property
+    def output_display(self) -> QTextEdit: # Convenience property
+        return self.output_panel.output_display
+
 
     def _create_actions(self):
         style = self.style()
@@ -270,6 +330,27 @@ class MainWindow(QMainWindow):
         self.new_msg_srv_action.triggered.connect(self.on_new_msg_srv_action)
         self.edit_pkg_config_action = QAction("Edit package.xml/CMakeLists.txt...", self)
         self.edit_pkg_config_action.triggered.connect(self.on_edit_pkg_config)
+
+        # --- Sidebar Actions (can reuse some or create new ones) ---
+        # For now, let's create a few distinct ones for demonstration
+        icon_explorer = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+        icon_settings = style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView) # Placeholder
+        icon_ai_assistant = QIcon.fromTheme("preferences-desktop-ai-assistant", QIcon()) # Placeholder, needs actual icon
+
+        self.sidebar_explorer_action = QAction(icon_explorer, "Explorer", self)
+        self.sidebar_explorer_action.triggered.connect(self.on_sidebar_explorer)
+        
+        self.sidebar_settings_action = QAction(icon_settings, "Settings", self)
+        self.sidebar_settings_action.triggered.connect(self.on_sidebar_settings)
+
+        self.sidebar_ai_action = QAction(icon_ai_assistant, "AI Assistant", self)
+        self.sidebar_ai_action.triggered.connect(self.on_sidebar_ai_assistant)
+
+        # Update the map now that actions are created
+        self.sidebar_view_action_map = {
+            "rosbuddy_settings_view": self.sidebar_settings_action,
+            "rosbuddy_ai_assistant_view": self.sidebar_ai_action,
+        }
 
         # Set initial enabled states directly or rely on first update_active_workspace_display
         # For clarity, we'll let update_active_workspace_display handle all dynamic enabling.
@@ -334,6 +415,21 @@ class MainWindow(QMainWindow):
         self.tool_bar.addAction(self.stop_task_action)
         self.tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
+    def _create_sidebar(self):
+        self.sidebar_tool_bar = QToolBar("Sidebar")
+        self.sidebar_tool_bar.setObjectName("sidebarToolBar")
+        self.sidebar_tool_bar.setMovable(False) # Usually sidebars are not movable
+        self.sidebar_tool_bar.setFloatable(False)
+        self.sidebar_tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly) # Icons only for sidebar
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.sidebar_tool_bar)
+
+        # Add sidebar actions
+        self.sidebar_tool_bar.addAction(self.sidebar_explorer_action) # Example
+        # Add more actions as they are defined and implemented
+        self.sidebar_tool_bar.addSeparator()
+        self.sidebar_tool_bar.addAction(self.sidebar_settings_action)
+        self.sidebar_tool_bar.addAction(self.sidebar_ai_action)
+
     def _create_status_bar(self):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -345,37 +441,36 @@ class MainWindow(QMainWindow):
         logger.debug(f"_create_central_widget: Method START.")
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        main_hbox_layout = QHBoxLayout(self.central_widget)
-        main_hbox_layout.setContentsMargins(0,0,0,0)
-        self.vertical_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_hbox_layout.addWidget(self.vertical_splitter)
+        
+        # Main layout for the central widget (everything to the right of the sidebar)
+        main_hbox_layout = QHBoxLayout(self.central_widget) 
+        main_hbox_layout.setContentsMargins(0, 0, 0, 0) # No margins for the main layout
 
-        # --- Left Pane: Workspace Explorer ---
-        self.vertical_splitter.addWidget(self.workspace_explorer)
+        # Main horizontal splitter: Workspace Explorer | (ActiveViewTabs / OutputPanel)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_hbox_layout.addWidget(self.main_splitter)
 
-        # --- Right Pane Container ---
-        right_pane_container_widget = QWidget()
-        right_pane_vbox_layout = QVBoxLayout(right_pane_container_widget)
-        right_pane_vbox_layout.setContentsMargins(0,0,0,0)
-        self.horizontal_splitter_right = QSplitter(Qt.Orientation.Vertical)
-        right_pane_vbox_layout.addWidget(self.horizontal_splitter_right)
+        # Left side of main_splitter: Workspace Explorer
+        self.main_splitter.addWidget(self.workspace_explorer)
 
-        # --- Right-Top Pane: Contextual View Placeholder ---
-        self.horizontal_splitter_right.addWidget(self.contextual_view_placeholder)
+        # Right side of main_splitter: Container for Active View Tabs and Output Panel
+        right_primary_pane_container = QWidget()
+        right_primary_pane_layout = QVBoxLayout(right_primary_pane_container)
+        right_primary_pane_layout.setContentsMargins(0, 0, 0, 0)
+        right_primary_pane_layout.setSpacing(0) # No spacing between tabs and output
 
-        # --- Right-Bottom Pane: Output Area ---
-        self.horizontal_splitter_right.addWidget(self.output_panel)
-        right_pane_vbox_layout.addWidget(self.horizontal_splitter_right)
-        self.vertical_splitter.addWidget(right_pane_container_widget)
-        self.vertical_splitter.setSizes([250, 950])
-        self.horizontal_splitter_right.setSizes([500, 300])
-        self.vertical_splitter.setOpaqueResize(False)
-        self.horizontal_splitter_right.setOpaqueResize(False)
-        logger.debug(f"_create_central_widget: Method END. Splitter children count: {self.vertical_splitter.count()}")
+        # Active View Tabs (takes most space)
+        right_primary_pane_layout.addWidget(self.active_view_tabs, 1) # Stretch factor 1
+
+        # Output Panel (below active view tabs)
+        right_primary_pane_layout.addWidget(self.output_panel, 0) # Stretch factor 0 (or smaller)
+
+        self.main_splitter.addWidget(right_primary_pane_container)
+        self.main_splitter.setSizes([250, 950]) # Initial sizes for Workspace Explorer and Right Pane
+        self.main_splitter.setOpaqueResize(False)
+
+        logger.debug(f"_create_central_widget: Method END. Splitter children count: {self.main_splitter.count()}")
         main_hbox_layout.setSpacing(0)
-        main_hbox_layout.setContentsMargins(0,0,0,0)
-        right_pane_vbox_layout.setSpacing(0)
-        right_pane_vbox_layout.setContentsMargins(0,0,0,0)
 
     def update_active_workspace_display(self, action_description: Optional[str] = None):
         logger.debug(f"update_active_workspace_display called. Current action_desc: '{self.current_action_description}', New event_desc: '{action_description}'") # <-- ADD THIS LINE
@@ -486,6 +581,11 @@ class MainWindow(QMainWindow):
                     package_item = QStandardItem(pkg_info.name)
                     package_item.setEditable(False)
                     package_item.setData(pkg_info, Qt.ItemDataRole.UserRole + 1) # Store PackageInfo
+                    # Add package.xml as a child
+                    package_xml_path = pkg_info.path / "package.xml"
+                    package_xml_item = QStandardItem(QIcon.fromTheme("text-xml", self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)), "package.xml")
+                    package_xml_item.setData(str(package_xml_path), Qt.ItemDataRole.UserRole + 2) # Store file path as string
+                    package_item.appendRow(package_xml_item)
                     # icon_pkg = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon) # Example
                     # package_item.setIcon(icon_pkg)
                     packages_parent_item.appendRow(package_item)
@@ -547,7 +647,139 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Edit Package Config", "Functionality to edit package configurations is not yet implemented.")
         # Example: dialog = PackageConfigEditorDialog(parent=self) ...
 
+    # --- Sidebar Action Slots ---
+    def on_sidebar_explorer(self):
+        logger.info("Sidebar: Explorer action triggered.")
+        # This action might toggle visibility or focus of the workspace explorer
+        # For now, just a message.
+        self.output_display.append_text("[INFO] Sidebar: Explorer (currently focuses main window)")
+        self.workspace_explorer.setFocus()
 
+    def _add_or_focus_tab(self, view_widget: QWidget, tab_title: str, tab_icon: Optional[QIcon] = None, unique_id: Optional[str] = None):
+        """
+        Adds a new tab with the given widget or focuses an existing tab
+        if a tab with the same unique_id (or title if unique_id is None) already exists.
+        """
+        if not unique_id:
+            unique_id = tab_title # Use title as unique identifier if no specific ID is given
+
+        # Check if a tab with this unique_id already exists
+        for i in range(self.active_view_tabs.count()):
+            widget_in_tab = self.active_view_tabs.widget(i)
+            # Store unique_id on the widget itself for easy retrieval
+            if hasattr(widget_in_tab, 'rosbuddy_tab_id') and widget_in_tab.rosbuddy_tab_id == unique_id:
+                self.active_view_tabs.setCurrentIndex(i)
+                logger.debug(f"Focused existing tab: '{tab_title}' (ID: {unique_id})")
+                return widget_in_tab # Return the existing widget
+
+        # If not found, create a new tab
+        # Store the unique_id on the widget
+        setattr(view_widget, 'rosbuddy_tab_id', unique_id)
+
+        if tab_icon:
+            index = self.active_view_tabs.addTab(view_widget, tab_icon, tab_title)
+        else:
+            index = self.active_view_tabs.addTab(view_widget, tab_title)
+        
+        self.active_view_tabs.setCurrentIndex(index)
+        logger.info(f"Opened new tab: '{tab_title}' (ID: {unique_id}) at index {index}")
+        return view_widget # Return the new widget
+
+    def on_sidebar_settings(self):
+        logger.info("Sidebar: Settings action triggered.")
+        settings_view = SettingsView(parent=self.active_view_tabs) # Parent to tab widget for lifecycle
+        self._add_or_focus_tab(
+            view_widget=settings_view,
+            tab_title="Settings",
+            tab_icon=self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), # Reuse icon
+            unique_id="rosbuddy_settings_view"
+        )
+
+    def on_sidebar_ai_assistant(self):
+        logger.info("Sidebar: AI Assistant action triggered.")
+        ai_view = AIAssistantView(parent=self.active_view_tabs)
+        self._add_or_focus_tab(
+            view_widget=ai_view,
+            tab_title="AI Assistant",
+            # tab_icon=QIcon.fromTheme("preferences-desktop-ai-assistant"), # If you have a theme icon
+            unique_id="rosbuddy_ai_assistant_view"
+        )
+
+    def _on_explorer_item_double_clicked(self, index: QModelIndex):
+        item = self.workspace_explorer.model.itemFromIndex(index)
+        if not item:
+            return
+
+        file_path_str = item.data(Qt.ItemDataRole.UserRole + 2) # Check for stored file path
+        if file_path_str:
+            file_path = pathlib.Path(file_path_str)
+            if file_path.is_file():
+                logger.info(f"Workspace explorer item double-clicked, opening file: {file_path}")
+                self._open_file_in_editor(file_path)
+            else:
+                logger.warning(f"Workspace explorer item double-clicked, but path is not a file: {file_path}")
+
+    def _open_file_in_editor(self, file_path: pathlib.Path):
+        editor_view = CodeEditorView(file_path=file_path, parent=self.active_view_tabs)
+        
+        # Connect the dirty state signal from this specific editor instance
+        editor_view.dirty_state_changed.connect(self._on_editor_dirty_state_changed)
+        
+        self._add_or_focus_tab(
+            view_widget=editor_view,
+            tab_title=file_path.name, # Initial title
+            # Consider adding a file icon based on type later
+            unique_id=str(file_path) # Use full path as unique ID for the tab
+        )
+
+    def _on_editor_dirty_state_changed(self, is_dirty: bool, file_path_str: str):
+        """Updates the tab title when an editor's dirty state changes."""
+        # file_path_str here is the unique_id of the tab
+        for i in range(self.active_view_tabs.count()):
+            widget_in_tab = self.active_view_tabs.widget(i)
+            if hasattr(widget_in_tab, 'rosbuddy_tab_id') and widget_in_tab.rosbuddy_tab_id == file_path_str:
+                base_title = pathlib.Path(file_path_str).name
+                new_tab_title = f"*{base_title}" if is_dirty else base_title
+                self.active_view_tabs.setTabText(i, new_tab_title)
+                
+                # If the active tab is this one, also update the editor's internal file_path_label
+                if isinstance(widget_in_tab, CodeEditorView) and self.active_view_tabs.currentIndex() == i:
+                     # The editor's _set_dirty already updates its internal label,
+                     # but this ensures tab title is primary.
+                     pass # Editor handles its own internal label update via its _set_dirty
+                break
+
+    def on_active_tab_changed(self, index: int):
+        """
+        Called when the current tab in active_view_tabs changes.
+        Updates the active state of sidebar buttons.
+        """
+        logger.debug(f"Active tab changed to index: {index}")
+        current_tab_widget = self.active_view_tabs.widget(index)
+        active_tab_id = None
+
+        if current_tab_widget and hasattr(current_tab_widget, 'rosbuddy_tab_id'):
+            active_tab_id = current_tab_widget.rosbuddy_tab_id
+            logger.debug(f"Current active tab ID: {active_tab_id}")
+
+        # Deactivate all mapped sidebar actions first
+        for action_unique_id, action_object in self.sidebar_view_action_map.items():
+            button = self.sidebar_tool_bar.widgetForAction(action_object)
+            if button:
+                is_active = (action_unique_id == active_tab_id)
+                button.setProperty("active", is_active)
+                # logger.debug(f"Setting button for action_id '{action_unique_id}' active: {is_active}")
+                self.style().unpolish(button)
+                self.style().polish(button)
+        
+        # Special handling for explorer if needed, but it's not a tab.
+        # For now, explorer button state is independent.
+        explorer_button = self.sidebar_tool_bar.widgetForAction(self.sidebar_explorer_action)
+        if explorer_button: # Ensure it doesn't get stuck in an active state from other logic
+            if not active_tab_id: # If welcome tab or no tabs, ensure explorer isn't falsely active
+                 explorer_button.setProperty("active", False) # Or handle its active state separately
+                 self.style().unpolish(explorer_button)
+                 self.style().polish(explorer_button)
 
     # --- Action Slots ---
     def on_new_workspace(self):
@@ -894,10 +1126,30 @@ class MainWindow(QMainWindow):
         state = {
             'window_geometry': self.saveGeometry().data().hex(),
         }
-        if hasattr(self, 'vertical_splitter'):
-            state['splitter_state'] = self.vertical_splitter.saveState().data().hex()
+        if hasattr(self, 'main_splitter'): # Updated to main_splitter
+            state['splitter_state'] = self.main_splitter.saveState().data().hex()
         return state
 
+    def on_close_tab(self, index: int):
+        """Handles the tabCloseRequested signal from the QTabWidget."""
+        widget = self.active_view_tabs.widget(index)
+        tab_name = self.active_view_tabs.tabText(index)
+        logger.info(f"Close tab requested for: '{tab_name}' at index {index}")
+
+        can_close = True
+        if isinstance(widget, CodeEditorView):
+            can_close = widget.close_view() # This will prompt user if dirty
+
+        if not can_close:
+            logger.debug(f"Tab close cancelled for '{tab_name}' due to unsaved changes or user action.")
+            return # Do not close the tab
+
+        self.active_view_tabs.removeTab(index)
+        if widget: # Clean up the widget if necessary
+            # If the widget had a rosbuddy_tab_id, ensure its corresponding sidebar button is deactivated
+            # This is implicitly handled by currentChanged signal firing after removal,
+            # which calls on_active_tab_changed.
+            widget.deleteLater()
     def closeEvent(self, event):
         """Override closeEvent to allow UI state saving from outside."""
         logger.info("Close event received. ROSBuddy shutting down...")
