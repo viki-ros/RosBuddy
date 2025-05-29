@@ -125,7 +125,8 @@ def generate_cmake_lists_content(config: PackageConfig) -> str:
         return "# This package is not configured as ament_cmake."
 
     project_name = config.name
-    has_interfaces = bool(config.interface_files)
+    interface_definitions = getattr(config, 'interface_definitions', [])
+    has_interfaces = bool(interface_definitions)
 
     lines = [
         f"cmake_minimum_required(VERSION 3.8)",
@@ -143,47 +144,57 @@ def generate_cmake_lists_content(config: PackageConfig) -> str:
     ]
 
     cmake_dependencies_to_find = set()
-    # Add rosidl_default_generators if interfaces are present and not already a dep
+    all_interface_definition_deps = set()
+
     if has_interfaces:
-        is_rosidl_dep_already = any(dep.name == "rosidl_default_generators" for dep in config.dependencies)
-        if not is_rosidl_dep_already:
-            cmake_dependencies_to_find.add("rosidl_default_generators")
+        cmake_dependencies_to_find.add("rosidl_default_generators")
+        for iface_def in interface_definitions:
+            for dep_name in iface_def.interface_package_dependencies:
+                all_interface_definition_deps.add(dep_name)
+                cmake_dependencies_to_find.add(dep_name)
 
-
+    # Add general dependencies from PackageConfig
     for dep in config.dependencies:
         if dep.dep_type in ["depend", "build_depend", "build_export_depend"]:
-            if dep.name not in ["ament_cmake"]: 
+            if dep.name not in ["ament_cmake"]:
                  cmake_dependencies_to_find.add(dep.name)
     
     if cmake_dependencies_to_find:
         lines.append("")
-        lines.append("# Find direct dependencies")
+        lines.append("# Find direct dependencies (including for interfaces)")
         for dep_name in sorted(list(cmake_dependencies_to_find)):
-            # If it's rosidl_default_generators, it's always REQUIRED for interface gen
-            required_keyword = "REQUIRED" if dep_name == "rosidl_default_generators" else "REQUIRED" # Or "OPTIONAL" for some
+            required_keyword = "REQUIRED"
             lines.append(f"find_package({dep_name} {required_keyword})")
     
+    # --- Targets (executables, libraries) section (existing logic should be fine) ---
     target_lines = _generate_targets_code(config)
     if target_lines and target_lines[0] != "# No C++ library or executable targets defined.":
         lines.extend(target_lines)
 
-    # Interface generation section
+    # --- Interface generation section ---
     lines.append("\n# Interface Generation")
     if has_interfaces:
-        lines.append("# Ensure rosidl_default_generators was found (added above)")
-        interface_file_list_str = '"\n#    "'.join([f.replace("\\", "/") for f in config.interface_files]) # CMake paths use /
-        lines.append(f"# TODO: Uncomment and verify/complete the rosidl_generate_interfaces call:")
-        lines.append(f"# rosidl_generate_interfaces(${{PROJECT_NAME}}")
-        lines.append(f'#   "{interface_file_list_str}"')
-        lines.append(f"#   # DEPENDENCIES std_msgs # Add other msg/srv/action packages your interfaces depend on")
-        lines.append(f"# )")
-        lines.append("# TODO: Also ensure targets that USE these interfaces link against them, e.g.:")
-        lines.append("# ament_target_dependencies(my_node ${PROJECT_NAME}__rosidl_typesupport_cpp)")
+        interface_file_paths_for_cmake = []
+        for iface_def in interface_definitions:
+            cmake_path = iface_def.relative_path.replace("\\", "/")
+            interface_file_paths_for_cmake.append(f'  "{cmake_path}"')
+
+        lines.append(f"rosidl_generate_interfaces(${{PROJECT_NAME}}")
+        lines.extend(interface_file_paths_for_cmake)
+        if all_interface_definition_deps:
+            deps_str = " ".join(sorted(list(all_interface_definition_deps)))
+            lines.append(f"  DEPENDENCIES {deps_str}")
+        lines.append(")")
+        lines.append("# If C++ executables/libraries in this package USE these interfaces, link them:")
+        lines.append(f"# ament_target_dependencies(my_node ${{PROJECT_NAME}}__rosidl_typesupport_cpp)")
     else:
-        lines.append("# No interface files defined in PackageConfig.")
+        lines.append("# No interface files defined in PackageConfig for generation.")
     
+    # --- Install rules section (existing logic for execs, libs, launch, config) ---
+    # For interfaces, rosidl_generate_interfaces + ament_package handle installation of generated code.
     lines.extend(_generate_install_rules_code(config))
 
+    # --- Linters and ament_package (existing logic) ---
     lines.extend([
         "",
         "if(BUILD_TESTING)",

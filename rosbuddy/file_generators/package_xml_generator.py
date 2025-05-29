@@ -102,14 +102,29 @@ def _generate_exports_xml(exports: list[Export], has_interfaces: bool, build_typ
 
 def generate_package_xml_content(config: PackageConfig) -> str:
     """Generates the complete XML content for a package.xml file."""
-    has_interfaces = bool(config.interface_files)
+    has_interfaces = bool(getattr(config, 'interface_definitions', []))
+
+    # Aggregate all unique dependencies from interface_package_dependencies
+    interface_deps = set()
+    if has_interfaces:
+        for iface in config.interface_definitions:
+            for dep in getattr(iface, 'interface_package_dependencies', []):
+                if dep:
+                    interface_deps.add(dep)
+    # Convert to Dependency objects if not already present in config.dependencies
+    all_deps = list(config.dependencies)
+    dep_names = {d.name for d in all_deps}
+    for dep_name in sorted(interface_deps):
+        if dep_name not in dep_names:
+            # Add as a generic <depend> (could be improved to be more specific if needed)
+            all_deps.append(Dependency(name=dep_name, dep_type="depend"))
 
     maintainers_xml = _generate_maintainers_xml(config.maintainers)
     licenses_xml = _generate_licenses_xml(config.licenses)
     authors_xml = _generate_authors_xml(config.authors) if config.authors else ""
     urls_xml = _generate_urls_xml(config.urls) if config.urls else ""
     
-    dependencies_xml_list = _generate_dependencies_xml(config.dependencies, has_interfaces, config.build_type)
+    dependencies_xml_list = _generate_dependencies_xml(all_deps, has_interfaces, config.build_type)
     exports_section_xml = _generate_exports_xml(config.exports, has_interfaces, config.build_type)
 
     test_depends_xml = textwrap.dedent("""\
