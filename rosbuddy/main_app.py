@@ -313,46 +313,53 @@ QTreeView::branch:open:has-children:has-siblings {
 """
 
 class RosBuddyApplication(QApplication):
-    def __init__(self, argv):
+    def __init__(self, argv, window_geometry=None, splitter_state=None):
         super().__init__(argv)
-
         # Instantiate core logic components
         self.workspace_manager = WorkspaceManager()
-        self.tool_invoker = ToolInvoker(self.workspace_manager) # ToolInvoker needs WorkspaceManager
-
-        # Create and show the main window, passing logic components
+        self.tool_invoker = ToolInvoker(self.workspace_manager)
+        # Create and show the main window, passing logic components and UI state
         self.main_window = MainWindow(
             workspace_manager=self.workspace_manager,
-            tool_invoker=self.tool_invoker
+            tool_invoker=self.tool_invoker,
+            window_geometry=window_geometry,
+            splitter_state=splitter_state
         )
         self.main_window.show()
 
+    def get_ui_state(self):
+        return self.main_window.get_ui_state()
 
-def main():
+
+def main(workspace_path=None, window_geometry=None, splitter_state=None):
     # Set application details (optional but good practice)
     QApplication.setApplicationName("ROSBuddy")
     QApplication.setOrganizationName("RosBuddyOrg") # Or your name/org
     QApplication.setApplicationVersion("0.1.2") # Match MainWindow's About dialog
 
     # --- Basic Logging Configuration (for console, before GUI handler is up) ---
-    # This configures the root logger. MainWindow will add its GUI handler to this same root logger.
     logging.basicConfig(
         level=logging.DEBUG, # Set root logger level
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[logging.StreamHandler(sys.stdout)] # Basic console output
     )
-    # Any logger created from now on (e.g. module_logger above, or loggers in other modules)
-    # will inherit this level and send to console. MainWindow will add its GUI handler to the root.
+    module_logger.info("ROSBuddy application bootstrap...")
 
-    module_logger.info("ROSBuddy application bootstrap...") # Log using the module_logger
-
-    app = RosBuddyApplication(sys.argv)
+    app = RosBuddyApplication(sys.argv, window_geometry=window_geometry, splitter_state=splitter_state)
+    if workspace_path:
+        # Try to set the workspace before showing the main window
+        success, msg = app.workspace_manager.set_active_workspace(workspace_path)
+        if not success:
+            module_logger.warning(f"Failed to set workspace from startup argument: {msg}")
     app.setStyleSheet(DARK_THEME_QSS)
 
     module_logger.info("ROSBuddy Application GUI initialized and starting event loop...")
     exit_code = app.exec()
+    # Return UI state for persistence
+    ui_state = app.get_ui_state()
     module_logger.info(f"ROSBuddy Application exited with code {exit_code}.")
     sys.exit(exit_code)
+    return ui_state
 
 if __name__ == '__main__':
     main()

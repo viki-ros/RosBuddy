@@ -6,7 +6,6 @@ import traceback
 import subprocess
 import time # Keep for now if on_stop_task uses it for a brief pause
 import logging
-import html # For OutputDisplay.append_text
 
 from PyQt6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QSplitter, QWidget, QLabel, QStatusBar, QMenuBar, QTextEdit,
@@ -27,6 +26,12 @@ from rosbuddy.core_logic import WorkspaceManager, ToolInvoker, create_package_sc
 # from rosbuddy.core_logic.package_discovery import PackageInfo # PackageInfo is used by SelectRosItemDialog
 from rosbuddy.data_models import PackageConfig
 from rosbuddy.ui.dialogs import CreatePackageDialog, SelectRosItemDialog
+from rosbuddy.ui.components import WorkspaceExplorer, OutputPanel, ContextualViewPlaceholder
+from rosbuddy.ui.components.worker import Worker, WorkerSignals
+from rosbuddy.ui.dialogs.node_creator_dialog import NodeCreatorDialog
+from rosbuddy.ui.dialogs.launch_file_composer_dialog import LaunchFileComposerDialog
+from rosbuddy.ui.dialogs.msg_srv_action_editor_dialog import MsgSrvActionEditorDialog
+from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog
 
 # --- Custom Logging Handler ---
 class QtLogSignal(QObject):
@@ -47,13 +52,6 @@ class QtLogHandler(logging.Handler):
             self.handleError(record)
 
 # --- Worker Thread Definition ---
-class WorkerSignals(QObject):
-    finished = pyqtSignal()
-    error = pyqtSignal(tuple)
-    result = pyqtSignal(tuple)
-    progress = pyqtSignal(str)
-    process_started = pyqtSignal(object)
-
 class Worker(QThread):
     def __init__(self, target_fn: Callable, *args, **kwargs):
         super().__init__()
@@ -94,104 +92,51 @@ class Worker(QThread):
             logger.debug("Worker.run() completed. Emitting finished signal.")
             self.signals.finished.emit()
 
-# --- Output Display Widget ---
-class OutputDisplay(QTextEdit):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("outputDisplay")
-        self.setReadOnly(True)
-        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-
-    def append_text(self, text: str):
-        escaped_text = html.escape(text)
-        colored_line = escaped_text # Default
-
-        if text.startswith("[OUT]"):
-            line_color = "#82AAFF"
-            colored_line = f'<span style="color: {line_color};">{escaped_text}</span>'
-        elif text.startswith("[ERR]"):
-            line_color = "#FF5370"
-            colored_line = f'<span style="color: {line_color};">{escaped_text}</span>'
-        else: # Application log message
-            if "CRITICAL" in text: line_color = "#FF0000" # Brighter Red for CRITICAL
-            elif "ERROR" in text: line_color = "#FF5370"
-            elif "WARNING" in text: line_color = "#FFCB6B"
-            elif "INFO" in text: line_color = "#C3E88D"
-            elif "DEBUG" in text: line_color = "#89DDFF"
-            else: line_color = "#DCDCDC" # Default app log text color
-            colored_line = f'<span style="color: {line_color};">{escaped_text}</span>'
-
-            if text.startswith("--- Starting:") or "--- Task" in text or "--- Attempting" in text :
-                 colored_line = f'<span style="color: {line_color};"><b>{escaped_text}</b></span>'
-
-        self.append(colored_line)
-        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
-
 # --- Main Application Window ---
 class MainWindow(QMainWindow):
-    def __init__(self, workspace_manager: WorkspaceManager, tool_invoker: ToolInvoker, parent=None):
+    def __init__(self, workspace_manager: WorkspaceManager, tool_invoker: ToolInvoker, parent=None, window_geometry=None, splitter_state=None):
         super().__init__(parent)
         self.setWindowTitle("ROSBuddy - ROS 2 Package Development Assistant")
-        self.setGeometry(100, 100, 1280, 800) # Slightly wider default
+        self.setGeometry(100, 100, 1280, 800)
+        # Restore window geometry if provided
+        if window_geometry:
+            self.restoreGeometry(window_geometry)
 
         self.workspace_manager = workspace_manager
         self.tool_invoker = tool_invoker
-        self.package_discovery = PackageDiscovery(self.workspace_manager) # Init PackageDiscovery
+        self.package_discovery = PackageDiscovery(self.workspace_manager)
         self.current_worker: Optional[Worker] = None
         self.current_action_description: str = ""
         self.running_ros_process: Optional[subprocess.Popen] = None
-        self.last_maint_name: str = "ROS User" # Store for create package dialog default
+        self.last_maint_name: str = "ROS User"
         self.last_maint_email: str = "user@example.com"
 
-        # --- Initialize UI Components that will be placed in layouts ---
-        # Workspace Explorer TreeView
-        self.workspace_explorer_view = QTreeView(self)
-        logger.debug(f"__init__: self.workspace_explorer_view has been created. Type: {type(self.workspace_explorer_view)}") # <-- ADD THIS LINE
-        self.workspace_explorer_model = QStandardItemModel(self)
-        self.workspace_explorer_view.setModel(self.workspace_explorer_model)
-        self.workspace_explorer_view.setHeaderHidden(True)
-        self.workspace_explorer_view.setObjectName("workspaceExplorerView")
+        # --- Modular UI Components ---
+        self.workspace_explorer = WorkspaceExplorer(self.package_discovery, self.workspace_manager)
+        self.output_panel = OutputPanel()
+        self.contextual_view_placeholder = ContextualViewPlaceholder()
 
-        # Output Display (created here, placed in _create_central_widget)
-        self.output_display = OutputDisplay(self)
-        logger.debug(f"__init__: self.output_display has been created. Type: {type(self.output_display)}") # <-- ADD THIS LINE
-
-        # Placeholders (will be replaced later)
-        self.workspace_explorer_placeholder = QLabel("Temp Explorer Placeholder") # Should NOT be used if treeview is used
-        self.contextual_view_placeholder = QLabel("Contextual View (Placeholder)")
-        self.contextual_view_placeholder.setObjectName("contextualViewPlaceholder")
-        self.contextual_view_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # --- Add Section Headers for Explorer and Output ---
-        self.workspace_explorer_header = QLabel("Workspace Explorer")
-        self.workspace_explorer_header.setStyleSheet("color: #b0b0b0; font-size: 15px; font-weight: bold; padding: 8px 0 4px 8px;")
-        self.contextual_view_placeholder.setText("Contextual View (Coming Soon)")
-        self.contextual_view_placeholder.setStyleSheet("color: #b0b0b0; font-size: 15px; font-weight: 600; padding: 16px;")
-        # --- End UI Initialization ---
-
-        # Clear Button (created here, placed in _create_central_widget)
-        self.clear_output_button = QToolButton()
-        self.clear_output_button.setText("Clear")
-        self.clear_output_button.setToolTip("Clear Output Console")
-        self.clear_output_button.setObjectName("clearOutputButton")
-        self.clear_output_button.clicked.connect(self.on_clear_output)
-        logger.debug(f"__init__: self.clear_output_button has been created.") # <-- ADD THIS LINE
-        # --- End UI Component Initialization ---
+        # Connect clear button
+        self.output_panel.clear_output_button.clicked.connect(self.on_clear_output)
+        self.output_display = self.output_panel.output_display
 
         self._create_actions()
         self._create_menu_bar()
         self._create_tool_bar()
         self._create_status_bar()
-        self._create_central_widget() # This will now create self.output_display
+        self._create_central_widget()
+        # Restore splitter state if provided
+        if splitter_state and hasattr(self, 'vertical_splitter'):
+            self.vertical_splitter.restoreState(splitter_state)
 
         # --- Setup GUI Logging ---
         self.log_signal_emitter = QtLogSignal()
         self.log_signal_emitter.log_message_written.connect(self.output_display.append_text)
         gui_log_handler = QtLogHandler(self.log_signal_emitter)
         gui_log_handler.setLevel(logging.DEBUG)
-        logging.getLogger().addHandler(gui_log_handler) # Add to root logger
+        logging.getLogger().addHandler(gui_log_handler)
         
-        self.update_active_workspace_display() # Initial UI state and explorer update
+        self.update_active_workspace_display()
         logger.info("MainWindow initialized and GUI logging handler set up.")
 
         # --- Apply Modern Dark Theme (LM Studio-like) ---
@@ -317,6 +262,15 @@ class MainWindow(QMainWindow):
         self.refresh_workspace_action.setStatusTip("Reload the list of packages from the current workspace")
         self.refresh_workspace_action.triggered.connect(self.on_refresh_workspace_explorer)
 
+        self.new_node_action = QAction("New Node...", self)
+        self.new_node_action.triggered.connect(self.on_new_node)
+        self.new_launch_action = QAction("New Launch File...", self)
+        self.new_launch_action.triggered.connect(self.on_new_launch_file)
+        self.new_msg_srv_action = QAction("New Msg/Srv/Action...", self)
+        self.new_msg_srv_action.triggered.connect(self.on_new_msg_srv_action)
+        self.edit_pkg_config_action = QAction("Edit package.xml/CMakeLists.txt...", self)
+        self.edit_pkg_config_action.triggered.connect(self.on_edit_pkg_config)
+
         # Set initial enabled states directly or rely on first update_active_workspace_display
         # For clarity, we'll let update_active_workspace_display handle all dynamic enabling.
         # The actions that depend on workspace or busy state are initially disabled by default
@@ -352,6 +306,12 @@ class MainWindow(QMainWindow):
         about_action = QAction("&About", self) # No icon needed for About in menu usually
         about_action.triggered.connect(self.on_about)
         help_menu.addAction(about_action)
+        asset_menu = menu_bar.addMenu("&Assets")
+        asset_menu.addAction(self.new_node_action)
+        asset_menu.addAction(self.new_launch_action)
+        asset_menu.addAction(self.new_msg_srv_action)
+        asset_menu.addSeparator()
+        asset_menu.addAction(self.edit_pkg_config_action)
 
     def _create_tool_bar(self):
         self.tool_bar = QToolBar("Main Toolbar")
@@ -382,95 +342,40 @@ class MainWindow(QMainWindow):
         # Initial message will be set by update_active_workspace_display
 
     def _create_central_widget(self):
-        logger.debug(f"_create_central_widget: Method START. Checking self.workspace_explorer_view: {type(getattr(self, 'workspace_explorer_view', None))}") # <-- ADD THIS LINE
+        logger.debug(f"_create_central_widget: Method START.")
         self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget) # Set it immediately
-        
-        main_hbox_layout = QHBoxLayout(self.central_widget) # Main layout for central_widget
-        main_hbox_layout.setContentsMargins(0,0,0,0) # No margins for the main splitter
-
-        # This is the main splitter dividing the window horizontally (left pane, right pane container)
+        self.setCentralWidget(self.central_widget)
+        main_hbox_layout = QHBoxLayout(self.central_widget)
+        main_hbox_layout.setContentsMargins(0,0,0,0)
         self.vertical_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_hbox_layout.addWidget(self.vertical_splitter) # Add splitter to main layout
+        main_hbox_layout.addWidget(self.vertical_splitter)
 
-        # --- Left Pane: Workspace Explorer (using the QTreeView initialized in __init__) ---
-        # self.workspace_explorer_view was created in __init__
-        if hasattr(self, 'workspace_explorer_view') and isinstance(self.workspace_explorer_view, QTreeView):
-            logger.debug(f"_create_central_widget: Adding self.workspace_explorer_view ({type(self.workspace_explorer_view)}) to vertical_splitter.") # <-- ADD THIS LINE
-            self.vertical_splitter.addWidget(self.workspace_explorer_view)
-        else:
-            logger.error("_create_central_widget: self.workspace_explorer_view is NOT a QTreeView or not found! Adding placeholder instead.") # <-- ADD THIS LINE
-            fallback_placeholder = QLabel("ERROR: TreeView Not Initialized!")
-            fallback_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.vertical_splitter.addWidget(fallback_placeholder)
-        
+        # --- Left Pane: Workspace Explorer ---
+        self.vertical_splitter.addWidget(self.workspace_explorer)
 
-        # --- Right Pane Container (will itself contain a vertical splitter) ---
+        # --- Right Pane Container ---
         right_pane_container_widget = QWidget()
         right_pane_vbox_layout = QVBoxLayout(right_pane_container_widget)
         right_pane_vbox_layout.setContentsMargins(0,0,0,0)
-        
-        # Nested Vertical Splitter (Top: Contextual View, Bottom: Output Pane)
         self.horizontal_splitter_right = QSplitter(Qt.Orientation.Vertical)
         right_pane_vbox_layout.addWidget(self.horizontal_splitter_right)
 
         # --- Right-Top Pane: Contextual View Placeholder ---
-        # self.contextual_view_placeholder was created in __init__
-        # self.horizontal_splitter_right.addWidget(self.contextual_view_placeholder)
         self.horizontal_splitter_right.addWidget(self.contextual_view_placeholder)
 
-        # --- Right-Bottom Pane: Output Area (Toolbar + Display) ---
-        output_pane_widget = QWidget()
-        output_pane_layout = QVBoxLayout(output_pane_widget)
-        output_pane_layout.setContentsMargins(0,0,0,0)
-        output_pane_layout.setSpacing(3)
-        
-        output_toolbar_container = QWidget() # Container for button
-        output_toolbar_layout = QHBoxLayout(output_toolbar_container)
-        output_toolbar_layout.setContentsMargins(2,2,2,2); output_toolbar_layout.setSpacing(5)
-        output_toolbar_layout.addStretch()
-        # self.clear_output_button was created in __init__
-        output_toolbar_layout.addWidget(self.clear_output_button)
-        output_pane_layout.addWidget(output_toolbar_container)
-        
-        # self.output_display was created in __init__
-        output_pane_layout.addWidget(self.output_display, stretch=1)
-        self.horizontal_splitter_right.addWidget(output_pane_widget)
-        # --- End Output Area ---
-
+        # --- Right-Bottom Pane: Output Area ---
+        self.horizontal_splitter_right.addWidget(self.output_panel)
         right_pane_vbox_layout.addWidget(self.horizontal_splitter_right)
         self.vertical_splitter.addWidget(right_pane_container_widget)
-        
-        # --- Configure Splitter Sizes ---
-        self.vertical_splitter.setSizes([250, 950]) # Explorer width, Right area width
-        self.horizontal_splitter_right.setSizes([500, 300]) # Contextual View height, Output height
-        
+        self.vertical_splitter.setSizes([250, 950])
+        self.horizontal_splitter_right.setSizes([500, 300])
         self.vertical_splitter.setOpaqueResize(False)
         self.horizontal_splitter_right.setOpaqueResize(False)
-        logger.debug(f"_create_central_widget: Method END. Splitter children count: {self.vertical_splitter.count()}") # <-- ADD THIS LINE
-
-        # Add workspace explorer header above the tree view
-        explorer_vbox = QVBoxLayout()
-        explorer_vbox.setContentsMargins(0,0,0,0)
-        explorer_vbox.setSpacing(0)
-        explorer_widget = QWidget()
-        explorer_widget.setLayout(explorer_vbox)
-        explorer_vbox.addWidget(self.workspace_explorer_header)
-        explorer_vbox.addWidget(self.workspace_explorer_view)
-        self.vertical_splitter.addWidget(explorer_widget)
-
-        # Output area: add a header above output display
-        output_header = QLabel("Output Console")
-        output_header.setStyleSheet("color: #b0b0b0; font-size: 15px; font-weight: bold; padding: 8px 0 4px 8px;")
-        output_pane_layout.insertWidget(0, output_header)
-
-        # Add some spacing and padding to layouts for a modern look
+        logger.debug(f"_create_central_widget: Method END. Splitter children count: {self.vertical_splitter.count()}")
         main_hbox_layout.setSpacing(0)
         main_hbox_layout.setContentsMargins(0,0,0,0)
         right_pane_vbox_layout.setSpacing(0)
         right_pane_vbox_layout.setContentsMargins(0,0,0,0)
-        output_pane_layout.setSpacing(6)
-        output_pane_layout.setContentsMargins(8,8,8,8)
 
     def update_active_workspace_display(self, action_description: Optional[str] = None):
         logger.debug(f"update_active_workspace_display called. Current action_desc: '{self.current_action_description}', New event_desc: '{action_description}'") # <-- ADD THIS LINE
@@ -537,43 +442,15 @@ class MainWindow(QMainWindow):
         self.active_ws_label.setText(f"Active Workspace: {ws_display_name_perm}")
         
         # --- Conditionally update workspace explorer ---
-        current_ws_in_explorer_text = ""
-        if self.workspace_explorer_model.rowCount() > 0:
-            item = self.workspace_explorer_model.item(0, 0) # Get the root item
-            if item: # Check if item is not None
-                current_ws_in_explorer_text = item.text()
-        logger.debug(f"Explorer update check: is_ws_active={is_ws_active}, current_explorer_text='{current_ws_in_explorer_text}', current_ws_name='{workspace_path.name if workspace_path else 'None'}'")
-        
-        needs_explorer_update = False
-        if is_ws_active: # A workspace is currently active
-            cond1_no_active_msg = "No Active Workspace" in current_ws_in_explorer_text
-            cond2_name_mismatch = not current_ws_in_explorer_text.startswith(workspace_path.name)
-            logger.debug(f"Explorer update check (is_ws_active=True): cond1_no_active_msg={cond1_no_active_msg}, cond2_name_mismatch={cond2_name_mismatch} (comparing '{current_ws_in_explorer_text}' with '{workspace_path.name}')")
-            # If explorer shows "No Active Workspace" OR shows a different workspace name
-            if cond1_no_active_msg or cond2_name_mismatch:
-                needs_explorer_update = True
-        elif not is_ws_active: # No workspace is active
-            cond3_stale_ws_msg = "No Active Workspace" not in current_ws_in_explorer_text
-            logger.debug(f"Explorer update check (is_ws_active=False): cond3_stale_ws_msg={cond3_stale_ws_msg} (current_explorer_text='{current_ws_in_explorer_text}')")
-            # If explorer does NOT show "No Active Workspace" (i.e., it shows an old one)
-            if cond3_stale_ws_msg:
-                needs_explorer_update = True
-        
-        is_refresh_action = (action_description and "refresh workspace" in action_description.lower())
-        logger.debug(f"Explorer update check: Final needs_explorer_update={needs_explorer_update}, is_refresh_action={is_refresh_action}")
-
-        if needs_explorer_update or is_refresh_action:
-            logger.debug(f"update_active_workspace_display: Triggering _update_workspace_explorer(). needs_explorer_update={needs_explorer_update}, action_description='{action_description}'") # <-- ADD THIS LINE
-            self._update_workspace_explorer() # Update tree view based on current state
-        else:
-            logger.debug("Condition NOT met: Skipping _update_workspace_explorer().")
+        if hasattr(self, 'workspace_explorer'):
+            self.workspace_explorer.update()
         QApplication.processEvents() # Ensure UI updates are processed
 
     def _update_workspace_explorer(self):
         """Populates/Updates the workspace explorer QTreeView with the active workspace and its packages."""
         logger.debug("_update_workspace_explorer: Method START.") # <-- ADD THIS LINE
         # Clear previous items but keep the model instance
-        self.workspace_explorer_model.clear()
+        self.workspace_explorer.model().clear()
         # self.workspace_explorer_model.setHorizontalHeaderLabels(['Workspace Structure']) # Optional
 
         active_ws_path = self.workspace_manager.get_active_workspace_path()
@@ -581,9 +458,9 @@ class MainWindow(QMainWindow):
         if not active_ws_path:
             root_item = QStandardItem("No Active Workspace")
             root_item.setEditable(False)
-            self.workspace_explorer_model.appendRow(root_item)
+            self.workspace_explorer.model().appendRow(root_item)
             logger.debug("Workspace explorer updated: No active workspace.")
-            self.workspace_explorer_view.header().setVisible(False)
+            self.workspace_explorer.header().setVisible(False)
             return
 
         # Create a root item for the workspace name
@@ -592,7 +469,7 @@ class MainWindow(QMainWindow):
         ws_root_item.setEditable(False)
         # icon_folder = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         # ws_root_item.setIcon(icon_folder)
-        self.workspace_explorer_model.appendRow(ws_root_item)
+        self.workspace_explorer.model().appendRow(ws_root_item)
 
         # Discover packages
         try:
@@ -613,7 +490,7 @@ class MainWindow(QMainWindow):
                     # package_item.setIcon(icon_pkg)
                     packages_parent_item.appendRow(package_item)
                 logger.debug(f"Workspace explorer updated with {len(discovered_packages)} packages.")
-                self.workspace_explorer_view.expand(packages_parent_item.index())
+                self.workspace_explorer.expand(packages_parent_item.index())
 
             else:
                 no_packages_item = QStandardItem("No packages found in src/")
@@ -621,7 +498,7 @@ class MainWindow(QMainWindow):
                 ws_root_item.appendRow(no_packages_item)
                 logger.info("Workspace explorer: Added 'No packages found in src/' under workspace node.")
             
-            self.workspace_explorer_view.expand(ws_root_item.index()) # Expand the workspace root item
+            self.workspace_explorer.expand(ws_root_item.index()) # Expand the workspace root item
         except Exception as e:
             error_msg = f"Error during package discovery or populating tree: {e}"
             logger.error(error_msg, exc_info=True)
@@ -631,8 +508,44 @@ class MainWindow(QMainWindow):
             if ws_root_item: ws_root_item.appendRow(error_item) # Check if ws_root_item exists
             
         
-        self.workspace_explorer_view.header().setVisible(False)
+        self.workspace_explorer.header().setVisible(False)
 
+    # --- Placeholder Asset Creation/Editing Slots ---
+    def on_new_node(self):
+        """Placeholder for creating a new ROS node."""
+        logger.info("New Node action triggered.")
+        self.output_display.append_text("[INFO] Action: New Node... (Not yet implemented)")
+        QMessageBox.information(self, "New Node", "Functionality to create a new node is not yet implemented.")
+        # Example of how you might use NodeCreatorDialog:
+        # dialog = NodeCreatorDialog(parent=self)
+        # if dialog.exec() == QDialog.DialogCode.Accepted:
+        #     node_data = dialog.get_node_data()
+        #     if node_data:
+        #         # Process node_data (e.g., generate files)
+        #         self.output_display.append_text(f"[INFO] New node '{node_data['node_name']}' creation initiated (logic pending).")
+        # else:
+        #     self.output_display.append_text("[INFO] New node creation cancelled.")
+
+    def on_new_launch_file(self):
+        """Placeholder for creating a new ROS launch file."""
+        logger.info("New Launch File action triggered.")
+        self.output_display.append_text("[INFO] Action: New Launch File... (Not yet implemented)")
+        QMessageBox.information(self, "New Launch File", "Functionality to create a new launch file is not yet implemented.")
+        # Example: dialog = LaunchFileComposerDialog(parent=self) ...
+
+    def on_new_msg_srv_action(self):
+        """Placeholder for creating a new ROS message, service, or action definition."""
+        logger.info("New Msg/Srv/Action action triggered.")
+        self.output_display.append_text("[INFO] Action: New Msg/Srv/Action... (Not yet implemented)")
+        QMessageBox.information(self, "New Msg/Srv/Action", "Functionality to create new Msg/Srv/Action definitions is not yet implemented.")
+        # Example: dialog = MsgSrvActionEditorDialog(parent=self) ...
+
+    def on_edit_pkg_config(self):
+        """Placeholder for editing package.xml or CMakeLists.txt."""
+        logger.info("Edit Package Config action triggered.")
+        self.output_display.append_text("[INFO] Action: Edit Package Config... (Not yet implemented)")
+        QMessageBox.information(self, "Edit Package Config", "Functionality to edit package configurations is not yet implemented.")
+        # Example: dialog = PackageConfigEditorDialog(parent=self) ...
 
 
 
@@ -976,7 +889,17 @@ class MainWindow(QMainWindow):
         else: # Should not happen if _create_central_widget runs
             logger.warning("on_clear_output called but output_display is not available.")
 
+    def get_ui_state(self):
+        """Return a dict with window geometry and splitter state for persistence."""
+        state = {
+            'window_geometry': self.saveGeometry().data().hex(),
+        }
+        if hasattr(self, 'vertical_splitter'):
+            state['splitter_state'] = self.vertical_splitter.saveState().data().hex()
+        return state
+
     def closeEvent(self, event):
+        """Override closeEvent to allow UI state saving from outside."""
         logger.info("Close event received. ROSBuddy shutting down...")
         if self.running_ros_process and self.running_ros_process.poll() is None:
             logger.info(f"Attempting to stop active ROS process (PID: {self.running_ros_process.pid}) on exit.")
