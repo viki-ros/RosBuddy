@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 # and that data_models/__init__.py correctly exports LaunchConfiguration or
 # you import directly from .launch_config
 from .launch_config import LaunchConfiguration 
+from .interface_definition import InterfaceFileDefinition
 
 class Dependency:
     """Represents a single dependency in package.xml."""
@@ -88,7 +89,7 @@ class PackageConfig:
         # --- Structures for package elements ---
         self.launch_configurations: List[LaunchConfiguration] = [] # Stores defined launch files with their content structure
         self.config_files_paths: List[str] = []    # Relative paths, e.g., ["config/params.yaml"]
-        self.interface_files: List[str] = []       # Relative paths, e.g., ["msg/MyData.msg"]
+        self.interface_definitions: List[InterfaceFileDefinition] = []  # List of InterfaceFileDefinition objects
         # --- Updated for C++ Targets ---
         self.executable_targets: List[ExecutableTarget] = [] 
         self.library_targets: List[LibraryTarget] = []   
@@ -131,10 +132,10 @@ class PackageConfig:
         if relative_path not in self.config_files_paths:
             self.config_files_paths.append(relative_path)
 
-    def add_interface_file(self, relative_path: str):
-        """Adds an interface file (e.g., 'msg/MyData.msg')."""
-        if relative_path not in self.interface_files:
-            self.interface_files.append(relative_path)
+    def add_interface_definition(self, iface_def: InterfaceFileDefinition):
+        """Adds a defined interface (msg/srv/action) to the package."""
+        self.interface_definitions.append(iface_def)
+        
     def add_executable_target(self, target: ExecutableTarget):
         self.executable_targets.append(target)
 

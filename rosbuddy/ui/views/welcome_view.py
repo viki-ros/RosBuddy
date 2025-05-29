@@ -17,15 +17,8 @@ class WelcomeView(BaseView):
         self._init_ui()
 
     def _init_ui(self):
-        # Clear placeholder from BaseView
-        base_layout = self.layout()
-        while base_layout.count():
-            item = base_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # Main layout will contain title and a scroll area for cards
-        main_layout = QVBoxLayout(self) # This is self.layout() from BaseView
+        # Use the layout from BaseView after clearing it
+        main_layout = self.clear_base_layout()
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(20)
 

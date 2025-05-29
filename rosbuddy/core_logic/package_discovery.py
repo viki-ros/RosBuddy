@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 import os
 from typing import List, Dict, Any, Optional, Tuple
 import logging # Add this
+import ast
 
 # Add a module-level logger
 logger_pd = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ class PackageDiscovery:
     Discovers ROS 2 packages within a given workspace and extracts basic information
     about their executables and launch files.
     """
-    def __init__(self, workspace_manager: 'WorkspaceManager'): # Expects WorkspaceManager instance
+    def __init__(self, workspace_manager): # Expects WorkspaceManager instance
         self.workspace_manager = workspace_manager
 
     def find_packages_in_active_workspace(self) -> List[PackageInfo]:
@@ -64,52 +65,68 @@ class PackageDiscovery:
         # Sort packages by name for consistent display
         return sorted(discovered_packages, key=lambda p: p.name.lower())
 
+    def _parse_setup_py_for_console_scripts(self, setup_py_path: pathlib.Path) -> List[str]:
+        executables = []
+        if not setup_py_path.is_file():
+            return executables
+        try:
+            with open(setup_py_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            tree = ast.parse(content)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'setup':
+                    for kw in node.keywords:
+                        if kw.arg == 'entry_points':
+                            if isinstance(kw.value, ast.Dict):
+                                for i, k_node in enumerate(kw.value.keys):
+                                    if isinstance(k_node, ast.Constant) and k_node.value == 'console_scripts':
+                                        val_node = kw.value.values[i]
+                                        if isinstance(val_node, ast.List):
+                                            for el_node in val_node.elts:
+                                                if isinstance(el_node, ast.Constant) and isinstance(el_node.value, str):
+                                                    entry_point_str = el_node.value
+                                                    exec_name = entry_point_str.split('=')[0].strip()
+                                                    if exec_name:
+                                                        executables.append(exec_name)
+                            break
+                    break
+        except Exception as e:
+            logger_pd.warning(f"Could not parse {setup_py_path} for executables using AST: {e}")
+        return sorted(list(set(executables)))
+
     def _populate_executables(self, pkg_info: PackageInfo):
         """
         Populates the executables list for a PackageInfo object.
-        Initial approach: Scan Python packages' setup.py for console_scripts.
-        Future: Parse CMakeLists.txt for add_executable.
+        Improved: Use AST to parse setup.py for console_scripts in ament_python packages.
         """
         if pkg_info.build_type == "ament_python":
             setup_py_path = pkg_info.path / "setup.py"
             if setup_py_path.is_file():
-                # This is tricky: parsing setup.py without executing it is hard.
-                # The safest way is to use AST or regex, but fragile.
-                # For a functional prototype, we might simplify or assume structure.
-                # A common hack: grep for 'console_scripts' entry_points
-                # For now, let's just assume a 'hello_world' executable if it's there
-                # and provide a placeholder for proper parsing.
-                
-                # A simple heuristic: check for a common hello_world node name
-                # This is unreliable in general, but demonstrates intent for prototype
-                python_pkg_module_path = pkg_info.path / pkg_info.name # e.g., my_pkg/my_pkg/
-                if python_pkg_module_path.is_dir():
-                    for py_file in python_pkg_module_path.iterdir():
-                        if py_file.is_file() and py_file.suffix == '.py' and py_file.stem != '__init__':
-                            # Check if 'main()' function is in the file (very basic check)
-                            try:
-                                with open(py_file, 'r', encoding='utf-8') as f:
-                                    content = f.read()
-                                if "def main(args=None):" in content: # Simple heuristic
-                                    # Executable name is usually the stem of the file or entry point name
-                                    # For hello_world_node.py, the entry point is 'hello_world'
-                                    if "hello_world_node" in py_file.stem:
-                                        pkg_info.executables.append("hello_world")
-                                    else:
-                                        pkg_info.executables.append(py_file.stem) # Fallback to filename
-                            except Exception as e:
-                                logger_pd.warning(f"Could not read Python file {py_file} for executables in package {pkg_info.name}: {e}")
+                # Use AST-based parsing for console_scripts
+                found_execs = self._parse_setup_py_for_console_scripts(setup_py_path)
+                pkg_info.executables.extend(found_execs)
+                if not found_execs:
+                    logger_pd.debug(f"AST parsing found no executables for {pkg_info.name}, trying old heuristic.")
+                    # Old heuristic fallback
+                    python_pkg_module_path = pkg_info.path / pkg_info.name
+                    if python_pkg_module_path.is_dir():
+                        for py_file in python_pkg_module_path.iterdir():
+                            if py_file.is_file() and py_file.suffix == '.py' and py_file.stem != '__init__':
+                                try:
+                                    with open(py_file, 'r', encoding='utf-8') as f:
+                                        content = f.read()
+                                    if "def main(args=None):" in content:
+                                        if "hello_world_node" in py_file.stem:
+                                            pkg_info.executables.append("hello_world")
+                                        else:
+                                            pkg_info.executables.append(py_file.stem)
+                                except Exception as e:
+                                    logger_pd.warning(f"Could not read Python file {py_file} for executables in package {pkg_info.name}: {e}")
             else:
                 logger_pd.debug(f"Python package '{pkg_info.name}' is missing setup.py (this is normal for some packages).")
-        
-        # TODO: For ament_cmake, parse CMakeLists.txt for add_executable
         elif pkg_info.build_type == "ament_cmake":
-            # For now, just add a placeholder if we know one exists from our scaffold
-            if "hello_world_node" in pkg_info.name: # e.g. if we created 'my_cpp_hello_world_node'
-                pkg_info.executables.append("my_cpp_node") # Placeholder executable name
-            # Real implementation would parse CMakeLists.txt
-            # e.g., use regex on CMakeLists.txt content: re.findall(r'add_executable\((.*?)\s', cmake_content)
-        
+            if "hello_world_node" in pkg_info.name:
+                pkg_info.executables.append("my_cpp_node")
         # Ensure unique executables
         pkg_info.executables = sorted(list(set(pkg_info.executables)))
 

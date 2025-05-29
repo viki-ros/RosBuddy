@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Project specific imports
 from rosbuddy.core_logic import WorkspaceManager, ToolInvoker, create_package_scaffolding, PackageDiscovery
-# from rosbuddy.core_logic.package_discovery import PackageInfo # PackageInfo is used by SelectRosItemDialog
+from rosbuddy.core_logic.package_discovery import PackageInfo
 from rosbuddy.data_models import PackageConfig
 from rosbuddy.ui.dialogs import CreatePackageDialog, SelectRosItemDialog
 from rosbuddy.ui.components import WorkspaceExplorer, OutputPanel, ContextualViewPlaceholder
@@ -35,6 +35,8 @@ from rosbuddy.ui.dialogs.node_creator_dialog import NodeCreatorDialog
 from rosbuddy.ui.dialogs.launch_file_composer_dialog import LaunchFileComposerDialog
 from rosbuddy.ui.dialogs.msg_srv_action_editor_dialog import MsgSrvActionEditorDialog
 from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog # Import new views
+from rosbuddy.file_generators.package_xml_modifier import update_package_xml_for_new_interface
+from rosbuddy.file_generators.cmake_modifier import update_cmakelists_for_new_interface
 from rosbuddy.ui.views import (SettingsView, AIAssistantView, CodeEditorView, WelcomeView,
                                NodeWizardView, LaunchRunnerView, DebugView, RosGraphInspectorView,
                                RosDoctorView, AIAgentActionView)
@@ -564,12 +566,73 @@ class MainWindow(QMainWindow):
         # Example: dialog = LaunchFileComposerDialog(parent=self) ...
 
     def on_new_msg_srv_action(self):
-        """Placeholder for creating a new ROS message, service, or action definition."""
+        """Allows creating a new ROS message, service, or action definition in the selected package."""
         logger.info("New Msg/Srv/Action action triggered.")
-        self.output_display.append_text("[INFO] Action: New Msg/Srv/Action... (Not yet implemented)")
-        QMessageBox.information(self, "New Msg/Srv/Action", "Functionality to create new Msg/Srv/Action definitions is not yet implemented.")
-        # Example: dialog = MsgSrvActionEditorDialog(parent=self) ...
+        self.output_display.append_text("[INFO] Action: New Msg/Srv/Action...")
 
+        selected_pkg_info = self._get_selected_package_info_from_explorer()
+        if not selected_pkg_info:
+            QMessageBox.warning(self, "No Package Selected",
+                                "Please select a package in the Workspace Explorer to add an interface to.")
+            self.output_display.append_text("[WARN] No package selected for new interface.")
+            return
+
+        dialog = MsgSrvActionEditorDialog(parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            iface_def = dialog.get_data()
+            if iface_def:
+                logger.info(f"Interface definition received: {iface_def.file_name} for package {selected_pkg_info.name}")
+                self.output_display.append_text(f"[INFO] Creating interface '{iface_def.file_name}' in package '{selected_pkg_info.name}'...")
+
+                # 1. Create the interface file
+                interface_file_full_path = selected_pkg_info.path / iface_def.relative_path
+                try:
+                    interface_file_full_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(interface_file_full_path, "w", encoding="utf-8") as f:
+                        f.write(iface_def.content)
+                    logger.info(f"Successfully created interface file: {interface_file_full_path}")
+                    self.output_display.append_text(f"[INFO] Created file: {iface_def.relative_path}")
+
+                    # 2. Modify existing package.xml
+                    package_xml_path = selected_pkg_info.path / "package.xml"
+                    if package_xml_path.exists():
+                        success_xml = update_package_xml_for_new_interface(package_xml_path, iface_def)
+                        if success_xml:
+                            logger.info(f"Successfully updated {package_xml_path} for new interface.")
+                            self.output_display.append_text(f"[INFO] Updated {package_xml_path.name}.")
+                        else:
+                            logger.error(f"Failed to update {package_xml_path}.")
+                            self.output_display.append_text(f"[ERROR] Failed to update {package_xml_path.name}.")
+                            QMessageBox.warning(self, "Update Error", f"Failed to update {package_xml_path.name}. Check logs.")
+                    else:
+                        logger.warning(f"package.xml not found at {package_xml_path} for package {selected_pkg_info.name}. Skipping update.")
+                        self.output_display.append_text(f"[WARN] {package_xml_path.name} not found. Skipping update.")
+
+                    # 3. Advise for CMakeLists.txt if ament_cmake
+                    if selected_pkg_info.build_type == "ament_cmake":
+                        msg = (f"Interface file '{iface_def.file_name}' created and package.xml updated.\n\n"
+                               f"Since '{selected_pkg_info.name}' is an ament_cmake package, "
+                               f"please manually update its CMakeLists.txt to include:\n"
+                               f"  - '{iface_def.relative_path}' in the rosidl_generate_interfaces() call.\n"
+                               f"  - Any new dependencies (e.g., {', '.join(iface_def.interface_package_dependencies) or 'none'}) in find_package().")
+                        QMessageBox.information(self, "Manual CMake Update Required", msg)
+                        self.output_display.append_text(f"[INFO] CMakeLists.txt for {selected_pkg_info.name} may need manual review/update.")
+                        # Attempt automatic update
+                        cmakelists_path = selected_pkg_info.path / "CMakeLists.txt"
+                        if cmakelists_path.exists():
+                            success_cmake = update_cmakelists_for_new_interface(cmakelists_path, iface_def, selected_pkg_info.name)
+                            self.output_display.append_text(f"[INFO] Attempted CMakeLists.txt update: {'Succeeded' if success_cmake else 'Failed or no changes needed'}.")
+
+                    self.on_refresh_workspace_explorer() # Refresh to show new files if possible
+                    self.update_active_workspace_display(f"Interface '{iface_def.file_name}' Added to {selected_pkg_info.name}")
+                except Exception as e:
+                    error_msg = f"Error processing new interface for {selected_pkg_info.name}: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    self.output_display.append_text(f"[ERROR] {error_msg}")
+                    QMessageBox.critical(self, "Interface Creation Error", error_msg)
+        else:
+            logger.debug("New interface creation cancelled by user.")
+            self.output_display.append_text("[INFO] New interface creation cancelled.")
     def on_edit_pkg_config(self):
         """Placeholder for editing package.xml or CMakeLists.txt."""
         logger.info("Edit Package Config action triggered.")
@@ -577,6 +640,21 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Edit Package Config", "Functionality to edit package configurations is not yet implemented.")
         # Example: dialog = PackageConfigEditorDialog(parent=self) ...
 
+    def _get_selected_package_info_from_explorer(self) -> Optional[PackageInfo]:
+        """
+        Retrieves the PackageInfo object for the currently selected item in the WorkspaceExplorer,
+        if the selected item is a package.
+        """
+        current_index = self.workspace_explorer.view.currentIndex()
+        if not current_index.isValid():
+            return None
+        
+        item = self.workspace_explorer.model.itemFromIndex(current_index)
+        if item:
+            pkg_info = item.data(Qt.ItemDataRole.UserRole + 1) # UserRole + 1 is for PackageInfo
+            if isinstance(pkg_info, PackageInfo):
+                return pkg_info
+        return None
     # --- Sidebar Action Slots ---
     def on_sidebar_explorer(self):
         logger.info("Sidebar: Explorer action triggered.")
@@ -898,6 +976,7 @@ class MainWindow(QMainWindow):
         logger.info(f"Starting task: {task_description}")
         self.output_display.append_text(f"\n--- Starting: {task_description} ---")
         self.update_active_workspace_display(task_description) # Sets busy state and current_action_description
+        logger.debug(f"_start_worker_task: After update_active_workspace_display, self.current_action_description is NOW '{self.current_action_description}' for task '{task_description}'")
 
         self.current_worker = Worker(target_fn, *args, **kwargs)
         self.current_worker.signals.progress.connect(self.output_display.append_text)
@@ -1071,7 +1150,9 @@ class MainWindow(QMainWindow):
         self.update_active_workspace_display(self.current_action_description) # Refresh UI, current_action_description should be "Task X in progress"
 
     def _on_worker_finished(self):
+        logger.debug(f"_on_worker_finished: ENTERED. self.current_action_description is '{self.current_action_description}'")
         task_desc = self.current_action_description if self.current_action_description else "Background task"
+        logger.debug(f"_on_worker_finished: self.current_action_description at this point is '{self.current_action_description}', task_desc resolved to '{task_desc}'")
         logger.info(f"--- Task '{task_desc}' Worker has finished ---")
 
         if self.running_ros_process:
@@ -1089,6 +1170,7 @@ class MainWindow(QMainWindow):
         self.update_active_workspace_display(f"Task '{task_desc}' Finished")
 
     def _on_worker_error(self, error_tuple):
+        logger.debug(f"_on_worker_error: ENTERED. self.current_action_description is '{self.current_action_description}'")
         exctype, value, tb_str = error_tuple
         task_desc = self.current_action_description if self.current_action_description else "Unnamed task"
         

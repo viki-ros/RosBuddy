@@ -167,17 +167,30 @@ def create_package_scaffolding(base_path: str, config: PackageConfig, include_he
             print(f"  Created/Ensured: config/ directory (no specific config files requested)")
 
         # Interface files
-        if config.interface_files:
-            print(f"  Processing interface files requests:")
-            for interface_file_rel_path in config.interface_files:
-                if not os.path.dirname(interface_file_rel_path):
-                    print(f"    Skipping interface file with no directory: {interface_file_rel_path}.")
-                    continue
-                interface_type_dir = pkg_path / os.path.dirname(interface_file_rel_path)
-                interface_type_dir.mkdir(parents=True, exist_ok=True)
-                full_interface_file_path = pkg_path / interface_file_rel_path
-                full_interface_file_path.touch(exist_ok=True)
-                print(f"    Created dummy interface file: {interface_file_rel_path}")
+        if hasattr(config, 'interface_definitions') and config.interface_definitions:
+            print(f"  Processing interface definitions:")
+            for iface_def in config.interface_definitions:
+                try:
+                    full_interface_file_path = pkg_path / iface_def.relative_path
+                    interface_type_dir = full_interface_file_path.parent
+                    interface_type_dir.mkdir(parents=True, exist_ok=True)
+                    with open(full_interface_file_path, "w", encoding="utf-8") as f:
+                        f.write(iface_def.content)
+                    print(f"    Created interface file: {iface_def.relative_path} with content.")
+                except AttributeError:
+                    print(f"    Skipping invalid interface definition object: {iface_def}")
+                    traceback.print_exc()
+                except OSError as e:
+                    print(f"    Error creating interface file {iface_def.relative_path}: {e}")
+                    traceback.print_exc()
+                except Exception as e:
+                    print(f"    Unexpected error processing interface definition {getattr(iface_def, 'file_name', iface_def)}: {e}")
+                    traceback.print_exc()
+        else:
+            (pkg_path / "msg").mkdir(exist_ok=True)
+            (pkg_path / "srv").mkdir(exist_ok=True)
+            (pkg_path / "action").mkdir(exist_ok=True)
+            print(f"  Created/Ensured: msg/, srv/, action/ directories (no specific interface definitions provided).")
 
         print(f"Package '{config.name}' created successfully at {pkg_path.resolve()}")
         return True

@@ -8,3 +8,4 @@ from .launch_config import (
     IncludeLaunchAction,
     LaunchConfiguration
 )
+from .interface_definition import InterfaceFileDefinition

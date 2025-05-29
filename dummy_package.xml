@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package format="3">
+  <name>dummy_pkg</name>
+  <version>0.0.0</version>
+  <description>Dummy package for test</description>
+  <maintainer email="user@example.com">ROS User</maintainer>
+  <license>Apache License 2.0</license>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <export>
+    <member_of_group>rosidl_interface_packages</member_of_group>
+  </export>
+</package>

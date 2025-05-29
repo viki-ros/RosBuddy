@@ -81,11 +81,14 @@ class CreatePackageDialog(QDialog):
         Returns None if rejected or data is invalid (though basic validation is handled by button state).
         """
         if self.result() == QDialog.DialogCode.Accepted:
+            desc = self.description_edit.toPlainText().strip()
+            if not desc:
+                desc = "TODO: Package description" # Default if empty
             return {
                 "name": self.package_name_edit.text().strip(),
                 "build_type": self.build_type_combo.currentText(),
                 "version": self.version_edit.text().strip(),
-                "description": self.description_edit.toPlainText().strip(), # Use toPlainText for QTextEdit
+                "description": desc,
                 "maintainer_name": self.maintainer_name_edit.text().strip(),
                 "maintainer_email": self.maintainer_email_edit.text().strip(),
                 "license_name": self.license_combo.currentText().strip(),

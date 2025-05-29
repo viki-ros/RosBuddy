@@ -82,8 +82,10 @@ def _generate_exports_xml(exports: list[Export], has_interfaces: bool, build_typ
         add_or_update_export("build_type", content=build_type)
 
     if has_interfaces:
+        print(f"DEBUG: has_interfaces is TRUE. Attempting to add member_of_group export.") # DEBUG
         add_or_update_export("member_of_group", content="rosidl_interface_packages", unique_key=("member_of_group", "rosidl_interface_packages"))
 
+    # print(f"DEBUG: initial managed_exports before user exports: {managed_exports}") # DEBUG
     for exp in exports:
         unique_key_user = exp.tag_name
         # Special handling for unique keys if user defines build_type or specific member_of_group
@@ -94,6 +96,7 @@ def _generate_exports_xml(exports: list[Export], has_interfaces: bool, build_typ
         
         add_or_update_export(exp.tag_name, exp.content, exp.attributes, unique_key=unique_key_user)
         
+    print(f"DEBUG: managed_exports dictionary: {managed_exports}") # DEBUG
     if not managed_exports:
         return ""
         
