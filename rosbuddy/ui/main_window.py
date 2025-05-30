@@ -6,6 +6,10 @@ import traceback
 import subprocess
 import time # Keep for now if on_stop_task uses it for a brief pause
 import logging
+import ast
+import astor
+from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from PyQt6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QSplitter, QWidget, QLabel, QStatusBar, QMenuBar, QTextEdit,
@@ -37,9 +41,11 @@ from rosbuddy.ui.dialogs.msg_srv_action_editor_dialog import MsgSrvActionEditorD
 from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog # Import new views
 from rosbuddy.file_generators.package_xml_modifier import update_package_xml_for_new_interface
 from rosbuddy.file_generators.cmake_modifier import update_cmakelists_for_new_interface
+from rosbuddy.code_generation.node_generator import NodeGenerator
 from rosbuddy.ui.views import (SettingsView, AIAssistantView, CodeEditorView, WelcomeView,
                                NodeWizardView, LaunchRunnerView, DebugView, RosGraphInspectorView,
                                RosDoctorView, AIAgentActionView)
+from rosbuddy.file_generators.package_xml_modifier import add_unique_dependency_to_package_xml
 
 # --- Custom Logging Handler ---
 class QtLogSignal(QObject):
@@ -240,6 +246,12 @@ class MainWindow(QMainWindow):
         self.edit_pkg_config_action = QAction(icon_settings, "Edit package.xml/CMakeLists.txt...", self)
         self.edit_pkg_config_action.triggered.connect(self.on_edit_pkg_config)
 
+        # New Python and C++ Node actions
+        self.new_python_node_action = QAction(icon_node, "New Python Node...", self)
+        self.new_python_node_action.triggered.connect(self.on_new_python_node)
+        self.new_cpp_node_action = QAction(icon_node, "New C++ Node...", self)
+        self.new_cpp_node_action.triggered.connect(self.on_new_cpp_node)
+
         # Map sidebar actions to their unique IDs for active state management
         self.sidebar_view_action_map = {
             "rosbuddy_settings_view": self.sidebar_settings_action,
@@ -298,6 +310,8 @@ class MainWindow(QMainWindow):
         asset_menu.addAction(self.new_msg_srv_action)
         asset_menu.addSeparator()
         asset_menu.addAction(self.edit_pkg_config_action)
+        asset_menu.addAction(self.new_python_node_action)
+        asset_menu.addAction(self.new_cpp_node_action)
 
     def _create_tool_bar(self):
         self.tool_bar = QToolBar("Main Toolbar")
@@ -320,6 +334,10 @@ class MainWindow(QMainWindow):
         self.tool_bar.addAction(self.stop_task_action)
         self.tool_bar.addAction(self.omni_search_action) # Add Omni-Search to toolbar
         self.tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+
+        # Optionally add the New Python Node and New C++ Node actions to the toolbar for quick access (if a toolbar is present in your UI setup).
+        self.tool_bar.addAction(self.new_python_node_action)
+        self.tool_bar.addAction(self.new_cpp_node_action)
 
     def _create_sidebar(self):
         self.sidebar_tool_bar = QToolBar("Sidebar")
@@ -542,6 +560,287 @@ class MainWindow(QMainWindow):
         
         self.workspace_explorer.header().setVisible(False)
 
+    # --- Custom Slot for New Python Node ---
+    def on_new_python_node(self):
+        """Handler to create a new Python node in a selected package."""
+        try:
+            dialog = NodeCreatorDialog(self.package_discovery, parent=self, build_type="ament_python")
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self.output_display.append_text("[INFO] Node creation cancelled.")
+                return
+                
+            # Get dialog data and validate
+            data = dialog.get_data()
+            pkg_name = data['package_name']
+            node_name = data['node_name']
+            node_type = data['node_type']
+            topic_name = data['topic_name']
+            msg_type = data['message_type']
+            
+            if not all([pkg_name, node_name, node_type, topic_name, msg_type]):
+                QMessageBox.critical(self, "Node Creation Error", "All fields must be filled.")
+                return
+
+            # Find package info
+            pkg_info = next((p for p in self.package_discovery.find_packages_in_active_workspace() if p.name == pkg_name), None)
+            if not pkg_info:
+                QMessageBox.critical(self, "Node Creation Error", f"Package '{pkg_name}' not found.")
+                return
+
+            pkg_path = pkg_info.path
+            module_dir = pkg_path / pkg_name
+            module_dir.mkdir(exist_ok=True)
+            
+            # Ensure __init__.py exists
+            init_file = module_dir / "__init__.py"
+            if not init_file.exists():
+                init_file.touch()
+                
+            # Create node file
+            node_file_path = module_dir / f"{node_name}.py"
+            node_gen = NodeGenerator()
+            node_code = node_gen.generate_node({
+                "type": node_type,
+                "name": node_name,
+                "msg_type": msg_type,
+                "topic": topic_name
+            })
+            with open(node_file_path, "w", encoding="utf-8") as f:
+                f.write(node_code)
+            self.output_display.append_text(f"[INFO] Created node file: {node_file_path}")
+                
+            # Update setup.py
+            setup_py_path = pkg_path / "setup.py"
+            if setup_py_path.exists():
+                if self._update_setup_py_entry_point(setup_py_path, pkg_name, node_name):
+                    self.output_display.append_text("[INFO] Updated setup.py with new entry point")
+                else:
+                    self.output_display.append_text("[WARNING] Could not update setup.py automatically")
+                    
+            # Update package.xml dependencies
+            package_xml_path = pkg_path / "package.xml"
+            if package_xml_path.exists():
+                try:
+                    tree = ET.parse(str(package_xml_path))
+                    root = tree.getroot()
+                    
+                    # Add required Python ROS2 dependencies
+                    msg_pkg = msg_type.split("/")[0]
+                    for dep in ["rclpy", msg_pkg]:
+                        add_unique_dependency_to_package_xml(root, dep, dep_type="depend")
+                    
+                    tree.write(str(package_xml_path), encoding="utf-8", xml_declaration=True)
+                    self.output_display.append_text("[INFO] Updated package.xml dependencies")
+                except Exception as e:
+                    logger.error(f"Failed to update package.xml: {e}", exc_info=True)
+                    self.output_display.append_text(f"[WARNING] Failed to update dependencies in package.xml: {e}")
+
+            # Feedback and refresh
+            self.output_display.append_text(f"[INFO] Successfully created node '{node_name}' in package '{pkg_name}'")
+            QMessageBox.information(self, "Node Created", f"Node '{node_name}' created in package '{pkg_name}'")
+            self.on_refresh_workspace_explorer()
+            
+        except Exception as e:
+            logger.error(f"Error creating new Python node: {e}", exc_info=True)
+            QMessageBox.critical(self, "Node Creation Error", f"Failed to create node: {e}")
+
+    def _update_setup_py_entry_point(self, setup_py_path: Path, package_name: str, node_executable_name: str) -> bool:
+        """
+        Updates the setup.py file to include a new console script entry point.
+        Uses ast to parse and modify the setup.py file.
+        """
+        try:
+            with open(setup_py_path, 'r', encoding='utf-8') as f:
+                source_code = f.read()
+            
+            tree = ast.parse(source_code)
+            
+            new_entry_point_str = f"{node_executable_name} = {package_name}.{node_executable_name}:main"
+
+            class EntryPointTransformer(ast.NodeTransformer):
+                def __init__(self, new_entry_val):
+                    super().__init__()
+                    self.new_entry_str = new_entry_val
+                    self.modified_in_setup = False
+
+                def visit_Call(self, node):
+                    # Check if this is the setup() call
+                    if isinstance(node.func, ast.Name) and node.func.id == 'setup':
+                        entry_points_kw = None
+                        for kw_idx, kw in enumerate(node.keywords):
+                            if kw.arg == 'entry_points':
+                                entry_points_kw = kw
+                                break
+                        
+                        if entry_points_kw: # 'entry_points' argument exists
+                            if isinstance(entry_points_kw.value, ast.Dict):
+                                ep_dict = entry_points_kw.value
+                                console_scripts_list_node = None
+                                cs_key_exists_in_dict = False
+                                # Find 'console_scripts' key in the entry_points Dict
+                                for i, key_node_in_dict in enumerate(ep_dict.keys):
+                                    if isinstance(key_node_in_dict, ast.Constant) and key_node_in_dict.value == 'console_scripts':
+                                        cs_key_exists_in_dict = True
+                                        if isinstance(ep_dict.values[i], ast.List):
+                                            console_scripts_list_node = ep_dict.values[i]
+                                        else:
+                                            # 'console_scripts' value is not a List, log and skip modification
+                                            logger.warning(f"setup.py: 'console_scripts' in 'entry_points' is not a List. Cannot modify.")
+                                            return node # Return node unchanged
+                                        break
+                                
+                                if console_scripts_list_node: # 'console_scripts' key and List found
+                                    # Add new entry point if it doesn't exist
+                                    if not any(isinstance(elt, ast.Constant) and elt.value == self.new_entry_str for elt in console_scripts_list_node.elts):
+                                        console_scripts_list_node.elts.append(ast.Constant(value=self.new_entry_str))
+                                        self.modified_in_setup = True
+                                elif cs_key_exists_in_dict: # 'console_scripts' key exists but value wasn't a list (handled above)
+                                    pass # Should have been caught by "not a List"
+                                else: # 'console_scripts' key does not exist in entry_points Dict, add it
+                                    ep_dict.keys.append(ast.Constant(value='console_scripts'))
+                                    new_cs_list = ast.List(elts=[ast.Constant(value=self.new_entry_str)], ctx=ast.Load())
+                                    ep_dict.values.append(new_cs_list)
+                                    self.modified_in_setup = True
+                            else: # 'entry_points' value is not a Dict
+                                logger.warning(f"setup.py: 'entry_points' value is not a Dict. Cannot modify.")
+                                return node # Return node unchanged
+                        else: # 'entry_points' argument does not exist, add it
+                            console_scripts_list_node = ast.List(elts=[ast.Constant(value=self.new_entry_str)], ctx=ast.Load())
+                            ep_dict_node = ast.Dict(keys=[ast.Constant(value='console_scripts')], values=[console_scripts_list_node])
+                            node.keywords.append(ast.keyword(arg='entry_points', value=ep_dict_node))
+                            self.modified_in_setup = True
+                        return node # Return the (potentially modified) setup call node
+                    return self.generic_visit(node) # Visit other nodes
+
+            transformer = EntryPointTransformer(new_entry_point_str)
+            new_tree = transformer.visit(tree)
+            
+            if transformer.modified_in_setup:
+                new_source_code = astor.to_source(new_tree)
+                with open(setup_py_path, 'w', encoding='utf-8') as f:
+                    f.write(new_source_code)
+                logger.info(f"Successfully updated setup.py with entry point: {new_entry_point_str}")
+                return True
+            else:
+                # Check if the entry point string is already in the file literally
+                # This covers cases where AST modification might not occur due to non-standard setup.py or if already present
+                with open(setup_py_path, 'r', encoding='utf-8') as f:
+                    current_content = f.read()
+                if new_entry_point_str in current_content:
+                    logger.info(f"Entry point '{new_entry_point_str}' already exists in setup.py.")
+                    return True # Consider it successful if already present
+                logger.info(f"setup.py: No AST modifications made for entry point '{new_entry_point_str}'. Structure might be non-standard or entry point already exists in an unusual format.")
+                return False # No modification made and not found literally
+
+        except FileNotFoundError:
+            logger.error(f"setup.py not found at {setup_py_path}")
+            QMessageBox.warning(self, "File Error", f"setup.py not found at {setup_py_path}")
+            return False
+        except Exception as e:
+            logger.error(f"Error updating setup.py at {setup_py_path}: {e}", exc_info=True)
+            QMessageBox.critical(self, "Update Error", f"Could not update setup.py: {e}")
+            return False
+
+    def on_new_cpp_node(self):
+        """Handler to create a new C++ node in a selected package."""
+        logger.info("New C++ Node action triggered.")
+        if self.current_worker and self.current_worker.isRunning():  # Standard busy check
+            QMessageBox.warning(self, "Busy", "Another task is in progress.")
+            return
+
+        active_ws_src_path = self.workspace_manager.get_active_workspace_src_path()
+        if not active_ws_src_path:  # Check for active workspace
+            QMessageBox.warning(self, "Error", "No active CMake workspace. Please open or create one first.")
+            logger.warning("New C++ Node attempted with no active workspace.")
+            return
+
+        dialog = NodeCreatorDialog(self.package_discovery, parent=self, build_type="ament_cmake")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.output_display.append_text("[INFO] C++ Node creation cancelled.")
+            return
+
+        try:
+            data = dialog.get_data()
+            pkg_name = data['package_name']
+            node_name = data['node_name']
+            node_type = data['node_type']
+            topic_name = data['topic_name']
+            msg_type = data['message_type']
+
+            if not (pkg_name and node_name and node_type and topic_name and msg_type):
+                QMessageBox.critical(self, "Node Creation Error", "All fields must be filled.")
+                return
+
+            # Find package info and validate it's an ament_cmake package
+            pkg_info = next((p for p in self.package_discovery.find_packages_in_active_workspace() if p.name == pkg_name), None)
+            if not pkg_info:
+                QMessageBox.critical(self, "Node Creation Error", f"Package '{pkg_name}' not found.")
+                return
+            
+            if pkg_info.build_type != "ament_cmake":
+                QMessageBox.critical(self, "Node Creation Error", f"Package '{pkg_name}' is not a C++ package (build_type is not ament_cmake).")
+                return
+
+            pkg_path = pkg_info.path
+            include_dir = pkg_path / "include" / pkg_name
+            src_dir = pkg_path / "src"
+            include_dir.mkdir(parents=True, exist_ok=True)
+            src_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate node files
+            from rosbuddy.code_generation.cpp_node_generator import CppNodeGenerator
+            node_gen = CppNodeGenerator()
+            node_code = node_gen.generate_node_files_content({
+                "package_name": pkg_name,
+                "node_name": node_name,
+                "role": node_type,
+                "topic_name": topic_name,
+                "message_type": msg_type
+            })
+
+            hpp_file_path = include_dir / f"{node_name}.hpp"
+            cpp_file_path = src_dir / f"{node_name}.cpp"
+
+            # Write the header and source files
+            with open(hpp_file_path, "w", encoding="utf-8") as f:
+                f.write(node_code["hpp_content"])
+            with open(cpp_file_path, "w", encoding="utf-8") as f:
+                f.write(node_code["cpp_content"])
+
+            # Update CMakeLists.txt to include the new node
+            from rosbuddy.file_generators.cmake_modifier import add_cpp_node_to_cmakelists
+            cmakelists_path = pkg_path / "CMakeLists.txt"
+            if cmakelists_path.exists():
+                import xml.etree.ElementTree as ET
+                success = add_cpp_node_to_cmakelists(
+                    cmakelists_path, 
+                    node_name,
+                    [str(cpp_file_path.relative_to(pkg_path))]  # Sources relative to package root
+                )
+                if not success:
+                    logger.warning(f"Could not automatically update CMakeLists.txt for node {node_name}")
+
+            # Update package.xml for message dependency
+            package_xml_path = pkg_path / "package.xml"
+            if package_xml_path.exists():
+                msg_pkg = msg_type.split("/")[0]
+                from rosbuddy.file_generators.package_xml_modifier import add_unique_dependency_to_package_xml
+                tree = ET.parse(str(package_xml_path))
+                root = tree.getroot()
+                # Add rclcpp and message type dependency
+                add_unique_dependency_to_package_xml(root, "rclcpp", dep_type="depend")
+                add_unique_dependency_to_package_xml(root, msg_pkg, dep_type="depend")
+                tree.write(str(package_xml_path), encoding="utf-8", xml_declaration=True)
+
+            # Feedback and refresh
+            self.output_display.append_text(f"[INFO] Created C++ node '{node_name}' in package '{pkg_name}'")
+            QMessageBox.information(self, "Node Created", f"C++ node '{node_name}' created in package '{pkg_name}'")
+            self.on_refresh_workspace_explorer()
+
+        except Exception as e:
+            logger.error(f"Error creating new C++ node: {e}", exc_info=True)
+            QMessageBox.critical(self, "Node Creation Error", f"Failed to create node: {e}")
+
     # --- Placeholder Asset Creation/Editing Slots ---
     def on_new_node(self):
         """Placeholder for creating a new ROS node."""
@@ -602,7 +901,7 @@ class MainWindow(QMainWindow):
                             self.output_display.append_text(f"[INFO] Updated {package_xml_path.name}.")
                         else:
                             logger.error(f"Failed to update {package_xml_path}.")
-                            self.output_display.append_text(f"[ERROR] Failed to update {package_xml_path.name}.")
+                            self.output_display.append_text(f"[ERROR] Failed to update {package_xml.name}.")
                             QMessageBox.warning(self, "Update Error", f"Failed to update {package_xml_path.name}. Check logs.")
                     else:
                         logger.warning(f"package.xml not found at {package_xml_path} for package {selected_pkg_info.name}. Skipping update.")
@@ -929,12 +1228,22 @@ class MainWindow(QMainWindow):
                 self.last_maint_email = data['maintainer_email']
                 logger.info(f"Package creation data received: {data}")
                 self.output_display.append_text(f"[INFO] Creating package '{data['name']}' with build type '{data['build_type']}'...")
-                # Quick operation for scaffolding
                 try:
                     cfg = PackageConfig(name=data['name'], version=data['version'], description=data['description'],
                                         maintainer_email=data['maintainer_email'], maintainer_name=data['maintainer_name'],
                                         license_name=data['license_name'], build_type=data['build_type'])
-                    # Future: Add more complex PackageConfig setup here if needed based on dialog
+                    # Auto-add hello world C++ node for ament_cmake if requested and no executable target present
+                    if data['build_type'] == 'ament_cmake' and data['include_hello_world'] and not cfg.executable_targets:
+                        from rosbuddy.data_models.package_config import ExecutableTarget
+                        hello_exec = ExecutableTarget(
+                            name="hello_world_cpp_node",
+                            sources=["src/hello_world_cpp_node.cpp"],
+                            linked_libraries=["rclcpp"]
+                        )
+                        cfg.add_executable_target(hello_exec)
+                        # Also add rclcpp as a dependency
+                        from rosbuddy.data_models.package_config import Dependency
+                        cfg.add_dependency(Dependency("rclcpp", dep_type="depend"))
                     ok = create_package_scaffolding(str(active_ws_src_path), cfg, data['include_hello_world'])
                     msg = f"Package '{data['name']}' {'created successfully.' if ok else 'creation failed.'}"
                     self.output_display.append_text(f"[INFO] {msg}")
@@ -942,7 +1251,6 @@ class MainWindow(QMainWindow):
                     if ok:
                         QMessageBox.information(self, "Package Creation", msg)
                         self.update_active_workspace_display(f"Package '{data['name']}' Created")
-                        # TODO: Optionally refresh workspace explorer here
                     else:
                         QMessageBox.critical(self, "Package Creation Error", msg)
                         self.update_active_workspace_display(f"Package '{data['name']}' Creation Failed")
@@ -1266,6 +1574,7 @@ class MainWindow(QMainWindow):
         # Worker handling (QThread usually exits when app does if not detached, but explicit quit is cleaner)
         if self.current_worker and self.current_worker.isRunning():
             logger.info("Requesting active worker to quit on application exit.")
+
             # self.current_worker.quit() # Request clean exit
             # self.current_worker.wait(500) # Wait max 500ms
             # if self.current_worker.isRunning(): # Still running?
@@ -1348,8 +1657,7 @@ if __name__ == '__main__':
     original_create_scaffolding = create_package_scaffolding # Keep original
     def mock_create_pkg_scaffold(base_path, pkg_cfg, include_hw):
         logger.info(f"MOCK: create_package_scaffolding called for {pkg_cfg.name}")
-        return True
-    # Replace the actual function with the mock for testing UI flow
+        return True    # Replace the actual function with the mock for testing UI flow
     # This requires rosbuddy.core_logic.create_package_scaffolding to be the actual import path
     # For a direct import like 'from rosbuddy.core_logic import create_package_scaffolding', this is harder to mock
     # Simpler: just ensure on_create_package doesn't crash.

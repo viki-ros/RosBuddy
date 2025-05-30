@@ -1,10 +1,24 @@
 from pathlib import Path
-from typing import Optional, Dict, List # Added List
+from typing import Optional, Dict, List
 import xml.etree.ElementTree as ET
 from rosbuddy.data_models.interface_definition import InterfaceFileDefinition
 import logging
 
 logger = logging.getLogger(__name__)
+
+def add_dependency_to_package_xml(package_xml_path: Path, dep_name: str, dep_type: str = "depend") -> bool:
+    """
+    Adds a new dependency to package.xml. This is a higher-level function that handles file operations.
+    """
+    try:
+        tree = ET.parse(str(package_xml_path))
+        root = tree.getroot()
+        add_unique_dependency_to_package_xml(root, dep_name, dep_type)
+        tree.write(str(package_xml_path), encoding="utf-8", xml_declaration=True)
+        return True
+    except Exception as e:
+        logger.error(f"Error adding dependency to package.xml: {e}", exc_info=True)
+        return False
 
 def ensure_element_with_text(
     parent_element: ET.Element,
@@ -69,7 +83,7 @@ def add_unique_dependency_to_package_xml(
     for child in root.findall(dep_type):
         if child.text == dep_name:
             logger.debug(f"Dependency {dep_type}: {dep_name} already exists.")
-            return # Already exists
+            return  # Already exists
 
     # Create the new dependency element
     new_dep_element = ET.Element(dep_type)
@@ -77,15 +91,25 @@ def add_unique_dependency_to_package_xml(
 
     # --- Logical Insertion ---
     # Order of preference for finding the "last tag of a certain kind" to insert after:
-    dep_like_tags_ordered = [
-                         'depend', 'build_depend', 'build_export_depend', 'exec_depend', 
-                         'test_depend', 'doc_depend', 'buildtool_depend']
+    insert_after_tags = [
+        'buildtool_depend',  # First check if there are any buildtool_depends
+        'depend',            # Then regular depends
+        'build_depend',      # Then specific depends
+        'build_export_depend',
+        'exec_depend',
+        'test_depend',
+                'doc_depend',
+        'description',       # Fall back to common required tags
+        'version',
+        'name'
+    ]
     last_relevant_element = None
     insertion_point_found = False
 
+    # Try to find a logical insertion point
     for tag_name_to_check in reversed(insert_after_tags):
         elements = root.findall(tag_name_to_check)
-        if elements: # Find the last one of this specific tag type
+        if elements:  # Find the last one of this specific tag type
             last_relevant_element = elements[-1]
             try:
                 index = list(root).index(last_relevant_element) + 1
@@ -95,36 +119,25 @@ def add_unique_dependency_to_package_xml(
                 break
             except ValueError:
                 logger.warning(f"Element <{tag_name_to_check}> found but not a direct child of root. This is unexpected.")
-                pass # Fall through
+                pass  # Fall through
 
     if not insertion_point_found:
         # Fallback: append after <export> or before <test_depend> or just append
-        export_tag = root.find("export")
-        if export_tag is not None:
+        test_depends = root.findall('test_depend')
+        if test_depends:
             try:
-                index = list(root).index(export_tag) + 1
+                index = list(root).index(test_depends[0])
                 root.insert(index, new_dep_element)
-                logger.debug(f"Inserted dependency {dep_type}: {dep_name} after <export>")
-            except ValueError: # Should not happen if export_tag is child of root
+                logger.debug(f"Inserted dependency {dep_type}: {dep_name} before first <test_depend>")
+            except ValueError:
                 root.append(new_dep_element)
-                logger.debug(f"Appended dependency {dep_type}: {dep_name} to root (fallback 1).")
+                logger.debug(f"Appended dependency {dep_type}: {dep_name} (fallback)")
         else:
-            # Try inserting before the first test_depend
-            first_test_depend = root.find("test_depend")
-            if first_test_depend is not None:
-                try:
-                    index = list(root).index(first_test_depend)
-                    root.insert(index, new_dep_element)
-                    logger.debug(f"Inserted dependency {dep_type}: {dep_name} before first <test_depend>")
-                except ValueError: # Should not happen
-                    root.append(new_dep_element)
-                    logger.debug(f"Appended dependency {dep_type}: {dep_name} to root (fallback 2).")
-            else:
-                root.append(new_dep_element) # Absolute fallback
-                logger.debug(f"Appended dependency {dep_type}: {dep_name} to root (absolute fallback).")
+            root.append(new_dep_element)
+            logger.debug(f"Appended dependency {dep_type}: {dep_name} (fallback)")
 
-def update_package_xml_for_new_interface(package_xml_path: Path, iface_def: InterfaceFileDefinition) -> bool:
-    logger.info(f"Attempting to update {package_xml_path} for interface {iface_def.file_name}")
+def update_package_xml_for_new_interface(package_xml_path: Path, rosidl_deps: List[str]) -> bool:
+    logger.info(f"Attempting to update {package_xml_path} for new interface")
     try:
         # Using a parser that might preserve comments/PIs is complex with standard ET.
         # For now, we accept that comments might be lost or formatting changed.
@@ -145,7 +158,7 @@ def update_package_xml_for_new_interface(package_xml_path: Path, iface_def: Inte
         add_dependency_to_package_xml(root, "rosidl_default_runtime", "exec_depend")
 
         # 3. Add interface dependencies from iface_def
-        for dep_name in iface_def.interface_package_dependencies:
+        for dep_name in rosidl_deps:
             add_unique_dependency_to_package_xml(root, dep_name, "depend") # Using <depend>
 
         # 4. Ensure <export><member_of_group>rosidl_interface_packages</member_of_group></export>
@@ -182,9 +195,9 @@ def update_package_xml_for_new_interface(package_xml_path: Path, iface_def: Inte
             logger.warning("ET.indent not available (requires Python 3.9+). XML output will not be pretty-printed by default.")
             
         tree.write(str(package_xml_path), encoding="utf-8", xml_declaration=True)
-        logger.info(f"Successfully updated {package_xml_path} for interface {iface_def.file_name}")
+        logger.info(f"Successfully updated {package_xml_path} for new interface")
         return True
         
     except Exception as e: # Catch any other unexpected errors
-        logger.error(f"Unexpected error updating {package_xml_path} for interface {iface_def.file_name}", exc_info=True)
+        logger.error(f"Unexpected error updating {package_xml_path} for new interface", exc_info=True)
         return False

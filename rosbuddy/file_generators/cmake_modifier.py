@@ -154,3 +154,113 @@ def update_cmakelists_for_new_interface(cmakelists_path: Path, iface_def: Interf
     except Exception as e:
         logger.error(f"Error updating {cmakelists_path}: {e}", exc_info=True)
         return False
+
+def add_cpp_node_to_cmakelists(cmakelists_path: Path, node_name: str, sources: List[str]) -> bool:
+    """
+    Adds a new C++ node executable to CMakeLists.txt.
+    Returns True if successful, False otherwise.
+
+    Args:
+        cmakelists_path: Path to CMakeLists.txt
+        node_name: Name of the node executable
+        sources: List of source files (relative to package root)
+    """
+    try:
+        with open(cmakelists_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        original_lines = list(lines)  # Keep a copy for comparison
+
+        # 1. Ensure required find_package calls
+        _ensure_find_package(lines, "rclcpp")
+
+        # 2. Find the right spot to add the new executable
+        # Try to group with other add_executable calls, or before install rules/ament_package
+        insert_index = -1
+        last_executable_idx = -1
+        last_library_idx = -1
+
+        for i, line in enumerate(lines):
+            if re.search(r'^\s*add_executable\(', line, re.IGNORECASE):
+                last_executable_idx = i
+            elif re.search(r'^\s*add_library\(', line, re.IGNORECASE):
+                last_library_idx = i
+            elif re.search(r'^\s*(install\(|ament_package\()', line, re.IGNORECASE):
+                if insert_index == -1:  # Haven't found a spot yet
+                    insert_index = i
+
+        # Prefer grouping with other executables
+        if last_executable_idx != -1:
+            # Find the end of the executable block
+            i = last_executable_idx + 1
+            while i < len(lines) and not re.search(r'^\s*(add_library|install|ament_package)\(', lines[i], re.IGNORECASE):
+                if re.search(r'^\s*add_executable\(', lines[i], re.IGNORECASE):
+                    last_executable_idx = i
+                i += 1
+            insert_index = last_executable_idx + 1
+        elif last_library_idx != -1:
+            # Place after libraries if no executables exist
+            i = last_library_idx + 1
+            while i < len(lines) and not re.search(r'^\s*(install|ament_package)\(', lines[i], re.IGNORECASE):
+                if re.search(r'^\s*add_library\(', lines[i], re.IGNORECASE):
+                    last_library_idx = i
+                i += 1
+            insert_index = last_library_idx + 1
+
+        if insert_index == -1:
+            # Fallback: insert before ament_package()
+            for i, line in enumerate(lines):
+                if re.search(r'^\s*ament_package\(\s*\)', line, re.IGNORECASE):
+                    insert_index = i
+                    break
+            if insert_index == -1:
+                insert_index = len(lines)  # Append to end if no ament_package found
+
+        # 3. Generate and insert the new executable block
+        new_lines = [
+            "\n# Node executable\n",
+            f"add_executable({node_name} {' '.join(sources)})\n",
+            f"ament_target_dependencies({node_name} rclcpp)\n"
+        ]
+
+        lines[insert_index:insert_index] = new_lines
+
+        # 4. Update install rules if they exist
+        install_start = -1
+        for i, line in enumerate(lines):
+            if re.search(r'^\s*install\(\s*TARGETS', line, re.IGNORECASE):
+                install_start = i
+                break
+
+        if install_start != -1:
+            # Find the end of the install block
+            install_end = install_start
+            for i in range(install_start, len(lines)):
+                if lines[i].strip() == ')':
+                    install_end = i
+                    break
+
+            # Check if the target is already listed
+            target_lines = lines[install_start + 1:install_end]
+            if not any(re.search(rf'^\s*{re.escape(node_name)}\s*$', line) for line in target_lines):
+                # Add the new target to the install block
+                lines.insert(install_end, f"  {node_name}\n")
+        else:
+            # Create a new install block for the executable
+            install_lines = [
+                "\n# Install targets\n",
+                "install(TARGETS\n",
+                f"  {node_name}\n",
+                "  DESTINATION lib/${PROJECT_NAME}\n",
+                ")\n"
+            ]
+            lines.insert(insert_index + len(new_lines), '\n'.join(install_lines))
+
+        if lines != original_lines:
+            with open(cmakelists_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            return True
+        return False  # No changes made
+
+    except Exception as e:
+        logger.error(f"Error updating CMakeLists.txt for node {node_name}: {e}", exc_info=True)
+        return False

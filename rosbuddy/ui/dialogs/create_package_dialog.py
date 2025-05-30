@@ -71,9 +71,17 @@ class CreatePackageDialog(QDialog):
         self.layout.addWidget(self.button_box)
 
     def _update_ok_button_state(self, text):
-        """Enable OK button only if package name is not empty."""
-        self.ok_button.setEnabled(bool(text.strip()))
-
+        """Enable OK button only if package name is valid (ROS rules)."""
+        import re
+        # ROS package name rules: lowercase, numbers, underscores, must start with a letter, no spaces
+        valid = bool(re.match(r'^[a-z][a-z0-9_]*$', text.strip()))
+        self.ok_button.setEnabled(valid)
+        if not valid and text.strip():
+            self.package_name_edit.setStyleSheet("border: 1px solid red;")
+            self.package_name_edit.setToolTip("Invalid package name. Use lowercase letters, numbers, and underscores. Must start with a letter.")
+        else:
+            self.package_name_edit.setStyleSheet("")
+            self.package_name_edit.setToolTip("")
 
     def get_package_data(self) -> Optional[Dict[str, Any]]:
         """

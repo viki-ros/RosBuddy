@@ -43,49 +43,77 @@ class WorkspaceExplorer(QWidget):
         - depth: Current recursion depth.
         - max_depth: How many levels of subdirectories to populate for important_dirs.
         """
-        if not dir_path.is_dir(): # Guard against non-directories
+        if not dir_path.is_dir():
             return
 
-        # Files to always show if they exist at the current level
-        # Directories to always show and recurse into (if within max_depth)
-        important_dirs = ["src", "launch", "include", "config", "test", "msg", "srv", "action", "resource", "params", "worlds", "models", "urdf", "rviz"]
-        
-        # Generic file/folder icons
+        # Important files and directories to always show
+        important_files = ["package.xml", "CMakeLists.txt", "setup.py"]
+        important_dirs = [
+            "src", "launch", "include", "config", "test", "msg", "srv", "action",
+            "resource", "params", "worlds", "models", "urdf", "rviz"
+        ]
+        # Recognized file extensions for ROS/typical text files
+        recognized_exts = {".py", ".cpp", ".hpp", ".xml", ".yaml", ".yml", ".txt", ".md", ".msg", ".srv", ".action"}
+
+        # Icons
         icon_file = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         icon_folder = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-        # Specific icons
         icon_xml = QIcon.fromTheme("text-xml", icon_file)
-        icon_cmake = QIcon.fromTheme("text-x-cmake", icon_file) 
+        icon_cmake = QIcon.fromTheme("text-x-cmake", icon_file)
         icon_python = QIcon.fromTheme("text-x-python", icon_file)
+        icon_yaml = QIcon.fromTheme("text-x-yaml", icon_file)
+        icon_msg = QIcon.fromTheme("text-x-generic", icon_file)
+        icon_srv = QIcon.fromTheme("text-x-generic", icon_file)
+        icon_action = QIcon.fromTheme("text-x-generic", icon_file)
 
         try:
-            # Sort items: directories first, then files, all alphabetically
+            # Sort: directories first, then files, all alphabetically
             sorted_items = sorted(list(dir_path.iterdir()), key=lambda p: (p.is_file(), p.name.lower()))
-
             for item_path in sorted_items:
                 item_name = item_path.name
-                item_data_role = Qt.ItemDataRole.UserRole + 2 # For file/dir paths to be opened
+                item_data_role = Qt.ItemDataRole.UserRole + 2
 
                 if item_path.is_file():
-                    current_icon = icon_file
-                    if item_name == "package.xml": current_icon = icon_xml
-                    elif item_name == "CMakeLists.txt": current_icon = icon_cmake
-                    elif item_name == "setup.py": current_icon = icon_python
-                    
+                    # Only show important files or recognized extensions
+                    show_file = (
+                        item_name in important_files or
+                        item_path.suffix in recognized_exts
+                    )
+                    if not show_file:
+                        continue
+                    # Icon selection
+                    if item_name == "package.xml":
+                        current_icon = icon_xml
+                    elif item_name == "CMakeLists.txt":
+                        current_icon = icon_cmake
+                    elif item_name == "setup.py" or item_path.suffix == ".py":
+                        current_icon = icon_python
+                    elif item_path.suffix in {".yaml", ".yml"}:
+                        current_icon = icon_yaml
+                    elif item_path.suffix == ".msg":
+                        current_icon = icon_msg
+                    elif item_path.suffix == ".srv":
+                        current_icon = icon_srv
+                    elif item_path.suffix == ".action":
+                        current_icon = icon_action
+                    else:
+                        current_icon = icon_file
                     file_item = QStandardItem(current_icon, item_name)
                     file_item.setEditable(False)
                     file_item.setData(str(item_path.resolve()), item_data_role)
                     parent_item.appendRow(file_item)
 
                 elif item_path.is_dir():
+                    # Only show important directories
+                    if item_name not in important_dirs:
+                        continue
                     dir_item = QStandardItem(icon_folder, item_name)
                     dir_item.setEditable(False)
-                    dir_item.setData(str(item_path.resolve()), item_data_role) # Store dir path too
+                    dir_item.setData(str(item_path.resolve()), item_data_role)
                     parent_item.appendRow(dir_item)
-                    
                     # Recurse into important directories if within max_depth
-                    if item_name in important_dirs and depth < max_depth:
-                         self._populate_directory_item(dir_item, item_path, depth + 1, max_depth)
+                    if depth < max_depth:
+                        self._populate_directory_item(dir_item, item_path, depth + 1, max_depth)
         except PermissionError:
             logger.warning(f"Permission denied for {dir_path}")
             parent_item.appendRow(QStandardItem(f"Permission Denied: {dir_path.name}"))
