@@ -488,14 +488,14 @@ class MainWindow(QMainWindow):
         
         # --- Conditionally update workspace explorer ---
         if hasattr(self, 'workspace_explorer'):
-            self.workspace_explorer.update()
+            self._update_workspace_explorer() # Call MainWindow's own method for detailed view
         QApplication.processEvents() # Ensure UI updates are processed
 
     def _update_workspace_explorer(self):
         """Populates/Updates the workspace explorer QTreeView with the active workspace and its packages."""
         logger.debug("_update_workspace_explorer: Method START.") # <-- ADD THIS LINE
-        # Clear previous items but keep the model instance
-        self.workspace_explorer.model().clear()
+        # Clear previous items from the model
+        self.workspace_explorer.model.clear()
         # self.workspace_explorer_model.setHorizontalHeaderLabels(['Workspace Structure']) # Optional
 
         active_ws_path = self.workspace_manager.get_active_workspace_path()
@@ -503,9 +503,9 @@ class MainWindow(QMainWindow):
         if not active_ws_path:
             root_item = QStandardItem("No Active Workspace")
             root_item.setEditable(False)
-            self.workspace_explorer.model().appendRow(root_item)
+            self.workspace_explorer.model.appendRow(root_item)
             logger.debug("Workspace explorer updated: No active workspace.")
-            self.workspace_explorer.header().setVisible(False)
+            self.workspace_explorer.view.header().setVisible(False)
             return
 
         # Create a root item for the workspace name
@@ -514,7 +514,7 @@ class MainWindow(QMainWindow):
         ws_root_item.setEditable(False)
         # icon_folder = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         # ws_root_item.setIcon(icon_folder)
-        self.workspace_explorer.model().appendRow(ws_root_item)
+        self.workspace_explorer.model.appendRow(ws_root_item)
 
         # Discover packages
         try:
@@ -531,24 +531,18 @@ class MainWindow(QMainWindow):
                     package_item = QStandardItem(pkg_info.name)
                     package_item.setEditable(False)
                     package_item.setData(pkg_info, Qt.ItemDataRole.UserRole + 1) # Store PackageInfo
-                    # Add package.xml as a child
-                    package_xml_path = pkg_info.path / "package.xml"
-                    package_xml_item = QStandardItem(QIcon.fromTheme("text-xml", self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)), "package.xml")
-                    package_xml_item.setData(str(package_xml_path), Qt.ItemDataRole.UserRole + 2) # Store file path as string
-                    package_item.appendRow(package_xml_item)
-                    # icon_pkg = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon) # Example
-                    # package_item.setIcon(icon_pkg)
+                    # Populate package contents recursively
+                    self._populate_directory_recursively(package_item, pkg_info.path)
                     packages_parent_item.appendRow(package_item)
                 logger.debug(f"Workspace explorer updated with {len(discovered_packages)} packages.")
-                self.workspace_explorer.expand(packages_parent_item.index())
+                self.workspace_explorer.view.expand(packages_parent_item.index()) # Use .view.expand()
 
             else:
                 no_packages_item = QStandardItem("No packages found in src/")
                 no_packages_item.setEditable(False)
                 ws_root_item.appendRow(no_packages_item)
                 logger.info("Workspace explorer: Added 'No packages found in src/' under workspace node.")
-            
-            self.workspace_explorer.expand(ws_root_item.index()) # Expand the workspace root item
+            self.workspace_explorer.view.expand(ws_root_item.index()) # Use .view.expand()
         except Exception as e:
             error_msg = f"Error during package discovery or populating tree: {e}"
             logger.error(error_msg, exc_info=True)
@@ -558,7 +552,52 @@ class MainWindow(QMainWindow):
             if ws_root_item: ws_root_item.appendRow(error_item) # Check if ws_root_item exists
             
         
-        self.workspace_explorer.header().setVisible(False)
+        self.workspace_explorer.view.header().setVisible(False)
+
+    def _populate_directory_recursively(self, parent_item: QStandardItem, directory_path: pathlib.Path):
+        """
+        Recursively populates a QStandardItem with the contents of a directory.
+        """
+        try:
+            # Sort entries: directories first, then files, then alphabetically
+            entries = sorted(
+                list(directory_path.iterdir()),
+                key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except PermissionError:
+            logger.warning(f"Permission denied when trying to list directory: {directory_path}")
+            perm_denied_item = QStandardItem(self.icon_manager.get_icon("dialog-error", QStyle.StandardPixmap.SP_MessageBoxCritical),
+                                             f"[Permission Denied] {directory_path.name}")
+            perm_denied_item.setEditable(False)
+            parent_item.appendRow(perm_denied_item)
+            return
+        except FileNotFoundError: # Should not happen if directory_path comes from a valid PackageInfo
+            logger.warning(f"Directory not found during population: {directory_path}")
+            return
+
+        for entry_path in entries:
+            # Skip common hidden/temporary/build files/folders for a cleaner view
+            if entry_path.name.startswith('.') or \
+               entry_path.name in ['__pycache__', 'build', 'install', 'log', 
+                                    'target', 'node_modules', '.vscode', '.idea', 'bin', 'lib', 'obj', 'Debug', 'Release']: # Added more common ignores
+                continue
+
+            item_name = entry_path.name
+            item: QStandardItem
+
+            if entry_path.is_dir():
+                icon = self.icon_manager.get_icon("folder", QStyle.StandardPixmap.SP_DirIcon)
+                item = QStandardItem(icon, item_name)
+                item.setEditable(False)
+                item.setData(str(entry_path), Qt.ItemDataRole.UserRole + 3) # UserRole + 3 for folder path (for future use)
+                parent_item.appendRow(item)
+                self._populate_directory_recursively(item, entry_path) # Recurse
+            elif entry_path.is_file():
+                icon = self.icon_manager.get_icon("text-x-generic", QStyle.StandardPixmap.SP_FileIcon)
+                item = QStandardItem(icon, item_name)
+                item.setEditable(False)
+                item.setData(str(entry_path), Qt.ItemDataRole.UserRole + 2) # UserRole + 2 for file path (for opening)
+                parent_item.appendRow(item)
 
     # --- Custom Slot for New Python Node ---
     def on_new_python_node(self):
