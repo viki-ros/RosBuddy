@@ -1,0 +1,1 @@
+This directory previously contained SVG icons, QRC files, and icon automation scripts for the old ROSBuddy icon system. As of May 2025, all icon and QRC resource usage has been removed from the codebase. This directory and its contents are now obsolete and can be deleted.

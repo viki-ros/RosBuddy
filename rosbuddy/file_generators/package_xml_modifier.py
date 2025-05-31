@@ -9,8 +9,14 @@ logger = logging.getLogger(__name__)
 def add_dependency_to_package_xml(package_xml_path: Path, dep_name: str, dep_type: str = "depend") -> bool:
     """
     Adds a new dependency to package.xml. This is a higher-level function that handles file operations.
+    Accepts either a file path (Path) or an ElementTree.Element as the first argument.
     """
     try:
+        if isinstance(package_xml_path, ET.Element):
+            # Already an element, just add the dependency
+            add_unique_dependency_to_package_xml(package_xml_path, dep_name, dep_type)
+            return True
+        # Otherwise, treat as a file path
         tree = ET.parse(str(package_xml_path))
         root = tree.getroot()
         add_unique_dependency_to_package_xml(root, dep_name, dep_type)
@@ -138,6 +144,18 @@ def add_unique_dependency_to_package_xml(
 
 def update_package_xml_for_new_interface(package_xml_path: Path, rosidl_deps: List[str]) -> bool:
     logger.info(f"Attempting to update {package_xml_path} for new interface")
+    if not package_xml_path.exists():
+        # Create a minimal package.xml if missing
+        logger.warning(f"package.xml not found at {package_xml_path}, creating a minimal one.")
+        minimal_xml = f'''<?xml version="1.0"?>
+<package format="3">
+  <name>{package_xml_path.parent.name}</name>
+  <version>0.0.0</version>
+  <description>Auto-generated package.xml</description>
+  <maintainer email="user@todo.com">TODO: Maintainer</maintainer>
+  <license>TODO: License</license>
+</package>'''
+        package_xml_path.write_text(minimal_xml, encoding="utf-8")
     try:
         # Using a parser that might preserve comments/PIs is complex with standard ET.
         # For now, we accept that comments might be lost or formatting changed.

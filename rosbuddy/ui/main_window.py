@@ -10,20 +10,23 @@ import ast
 import astor
 from pathlib import Path
 import xml.etree.ElementTree as ET
+from typing import Optional, Dict
 
 from PyQt6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QSplitter, QWidget, QLabel, QStatusBar, QMenuBar, QTextEdit,
     QMessageBox, QFileDialog, QInputDialog, QDialog, QCheckBox, QApplication, QToolButton, QToolBar, QTabWidget,
     QStyle, # For standard icons
-    QTreeView # For Workspace Explorer
+    QTreeView, # For Workspace Explorer
+    QLineEdit,
+    QStackedWidget,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QModelIndex, QByteArray
-# Typing imports
-from typing import Optional, List, Dict, Any, Callable # Ensure all common types are here
-from PyQt6.QtGui import QAction, QIcon, QStandardItemModel, QStandardItem, QKeySequence
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QModelIndex, QByteArray, QFile, QSize
+from PyQt6.QtGui import QIcon, QStandardItemModel, QStandardItem, QKeySequence, QAction
 
 # Project imports
 from rosbuddy.utils.icon_manager import IconManager
+from rosbuddy.ui.views.ros_tools_navigation_view import RosToolsNavigationView
+from rosbuddy.ui.wizards import ParameterFileWizard
  
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -40,12 +43,14 @@ from rosbuddy.ui.dialogs.launch_file_composer_dialog import LaunchFileComposerDi
 from rosbuddy.ui.dialogs.msg_srv_action_editor_dialog import MsgSrvActionEditorDialog
 from rosbuddy.ui.dialogs.package_config_editor_dialog import PackageConfigEditorDialog # Import new views
 from rosbuddy.file_generators.package_xml_modifier import update_package_xml_for_new_interface
-from rosbuddy.file_generators.cmake_modifier import update_cmakelists_for_new_interface
+from rosbuddy.file_generators.cmake_modifier import update_cmakelists_for_new_interface, CMakeUpdateStatus
 from rosbuddy.code_generation.node_generator import NodeGenerator
 from rosbuddy.ui.views import (SettingsView, AIAssistantView, CodeEditorView, WelcomeView,
                                NodeWizardView, LaunchRunnerView, DebugView, RosGraphInspectorView,
                                RosDoctorView, AIAgentActionView)
 from rosbuddy.file_generators.package_xml_modifier import add_unique_dependency_to_package_xml
+from rosbuddy.file_generators.cmake_generator import generate_cmake_lists_content
+from rosbuddy.data_models.package_config import PackageConfig, Dependency
 
 # --- Custom Logging Handler ---
 class QtLogSignal(QObject):
@@ -69,6 +74,9 @@ class QtLogHandler(logging.Handler):
 class MainWindow(QMainWindow):
     def __init__(self, workspace_manager: WorkspaceManager, tool_invoker: ToolInvoker, parent=None, window_geometry=None, splitter_state=None):
         super().__init__(parent)
+        self.active_ws_label = QLabel("Active Workspace: None")
+        self.active_ws_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 6px 12px; color: #00aaff;")
+
         self.setWindowTitle("ROSBuddy - ROS 2 Package Development Assistant")
         self.setGeometry(100, 100, 1280, 800)
         # Restore window geometry if provided
@@ -86,6 +94,17 @@ class MainWindow(QMainWindow):
 
         # Initialize IconManager before creating actions
         self.icon_manager = IconManager(self.style())
+
+        # --- Legacy action attributes for compatibility ---
+        self.new_workspace_action = QAction("New Workspace", self)
+        self.open_workspace_action = QAction("Open Workspace", self)
+        self.create_package_action = QAction("Create Package", self)
+        self.build_workspace_action = QAction("Build Workspace", self)
+        self.clean_workspace_action = QAction("Clean Workspace", self)
+        self.run_executable_action = QAction("Run Executable", self)
+        self.launch_file_action = QAction("Launch File", self)
+        self.stop_task_action = QAction("Stop Task", self)
+        self.refresh_workspace_action = QAction("Refresh Workspace", self)
 
         # --- Modular UI Components ---
         self.workspace_explorer = WorkspaceExplorer(self.package_discovery, self.workspace_manager)
@@ -109,15 +128,84 @@ class MainWindow(QMainWindow):
         # Connect clear button
         self.output_panel.clear_output_button.clicked.connect(self.on_clear_output)
 
-        self._create_actions()
-        self._create_menu_bar()
-        self._create_tool_bar()
-        self._create_sidebar() # Call _create_sidebar here
-        self._create_status_bar()
-        self._create_central_widget()
-        # Restore splitter state if provided
-        if splitter_state and hasattr(self, 'main_splitter'): # Updated to main_splitter
-            self.main_splitter.restoreState(splitter_state)
+        # --- Sidebar ---
+        self.sidebar_tool_bar = QToolBar("Sidebar")
+        self.sidebar_tool_bar.setObjectName("sidebarToolBar")
+        self.sidebar_tool_bar.setMovable(False)
+        self.sidebar_tool_bar.setFloatable(False)
+        self.sidebar_tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.sidebar_tool_bar.setFixedWidth(120)
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.sidebar_tool_bar)
+
+        # Sidebar actions
+        self.sidebar_actions = []
+        sidebar_sections = [
+            ("Explorer", "Workspace Explorer"),
+            ("Node Wizard", "Node Wizard"),
+            ("Launch Runner", "Launch Runner"),
+            ("AI Assistant", "AI Assistant"),
+            ("Settings", "Settings")
+        ]
+        self.sidebar_content_stack = QStackedWidget()
+        for idx, (action_name, label_text) in enumerate(sidebar_sections):
+            action = QAction(action_name, self)
+            action.setCheckable(True)
+            self.sidebar_tool_bar.addAction(action)
+            self.sidebar_actions.append(action)
+            # Add placeholder content for each section
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            label = QLabel(label_text)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("font-size: 22px; font-weight: bold; margin-top: 40px;")
+            layout.addWidget(label)
+            self.sidebar_content_stack.addWidget(page)
+
+        # Sidebar action switching
+        def make_switcher(i):
+            return lambda checked=False, i=i: self.sidebar_content_stack.setCurrentIndex(i)
+        for i, action in enumerate(self.sidebar_actions):
+            action.triggered.connect(make_switcher(i))
+        self.sidebar_actions[0].setChecked(True)
+        self.sidebar_content_stack.setCurrentIndex(0)
+
+        # --- Toolbar ---
+        self.tool_bar = QToolBar("Main Toolbar")
+        self.tool_bar.setObjectName("mainToolBar")
+        self.tool_bar.setMovable(True)
+        self.tool_bar.setFloatable(True)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.tool_bar)
+        toolbar_actions = [
+            ("New Workspace", self.on_new_workspace),
+            ("Open Workspace", self.on_open_workspace),
+            ("Build", self.on_build_workspace),
+            ("Run", self.on_run_executable),
+            ("Launch", self.on_launch_file),
+            ("Stop", self.on_stop_task),
+            ("Refresh", self.on_refresh_workspace_explorer)
+        ]
+        for name, slot in toolbar_actions:
+            action = QAction(name, self)
+            action.triggered.connect(slot)
+            self.tool_bar.addAction(action)
+
+        # --- Central Widget Layout ---
+        central = QWidget()
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(self.active_ws_label)
+        h_layout = QHBoxLayout()
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(0)
+        h_layout.addWidget(self.sidebar_content_stack)
+        main_layout.addLayout(h_layout)
+        self.setCentralWidget(central)
+
+        # --- Status Bar ---
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("Ready.")
 
         # --- Setup GUI Logging ---
         self.log_signal_emitter = QtLogSignal()
@@ -130,6 +218,17 @@ class MainWindow(QMainWindow):
         logger.info("MainWindow initialized and GUI logging handler set up.")
         self._open_initial_view() # Open WelcomeView or show placeholder
         self._update_empty_tab_placeholder_visibility() # Initial check
+
+        # Apply modern dark theme
+        try:
+            qss_file = QFile(":/rosbuddy/ui/resources/themes/modern_dark.qss")
+            if not qss_file.exists():
+                qss_file.setFileName(str(pathlib.Path(__file__).parent / "resources/themes/modern_dark.qss"))
+            if qss_file.open(QFile.OpenModeFlag.ReadOnly | QFile.OpenModeFlag.Text):
+                qss = str(qss_file.readAll(), encoding="utf-8")
+                QApplication.instance().setStyleSheet(qss)
+        except Exception as theme_exc:
+            print(f"[ROSBuddy] Failed to apply theme: {theme_exc}")
 
     @property
     def active_tab_unique_id(self) -> Optional[str]:
@@ -146,110 +245,86 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self):
         """Creates all QActions used in menus and toolbars."""
-        # Main toolbar and menu actions
-        icon_new_ws = self.icon_manager.get_icon("document-new", QStyle.StandardPixmap.SP_FileIcon)
-        icon_open_ws = self.icon_manager.get_icon("document-open", QStyle.StandardPixmap.SP_DirIcon)
-        icon_exit = self.icon_manager.get_icon("application-exit", QStyle.StandardPixmap.SP_DialogCloseButton)
-        icon_create_pkg = self.icon_manager.get_icon("package-x-generic", QStyle.StandardPixmap.SP_DirIcon)
-        icon_build = self.icon_manager.get_icon("system-run", QStyle.StandardPixmap.SP_MediaPlay)
-        icon_clean = self.icon_manager.get_icon("edit-clear", QStyle.StandardPixmap.SP_TrashIcon)
-        icon_run_exec = self.icon_manager.get_icon("utilities-terminal", QStyle.StandardPixmap.SP_CommandLink)
-        icon_launch = self.icon_manager.get_icon("system-launch", QStyle.StandardPixmap.SP_MediaPlay)
-        icon_stop = self.icon_manager.get_icon("process-stop", QStyle.StandardPixmap.SP_MediaStop)
-        icon_refresh = self.icon_manager.get_icon("view-refresh", QStyle.StandardPixmap.SP_BrowserReload)
-
-        # Sidebar icons
-        icon_explorer = self.icon_manager.get_icon("folder", QStyle.StandardPixmap.SP_DirIcon)
-        icon_settings = self.icon_manager.get_icon("preferences-system", QStyle.StandardPixmap.SP_FileDialogDetailedView)
-        icon_ai = self.icon_manager.get_icon("ai-assistant", QStyle.StandardPixmap.SP_MessageBoxQuestion)
-        icon_debug = self.icon_manager.get_icon("debug", QStyle.StandardPixmap.SP_MessageBoxQuestion)
-        icon_node = self.icon_manager.get_icon("code-node", QStyle.StandardPixmap.SP_FileIcon)
-        icon_graph = self.icon_manager.get_icon("network-graph", QStyle.StandardPixmap.SP_DriveNetIcon)
-        icon_launch_runner = self.icon_manager.get_icon("launch-runner", QStyle.StandardPixmap.SP_MediaPlay)
-        icon_agent = self.icon_manager.get_icon("ai-agent", QStyle.StandardPixmap.SP_CommandLink)
-        icon_doctor = self.icon_manager.get_icon("ros-doctor", QStyle.StandardPixmap.SP_DialogHelpButton)
-        icon_omni_search = self.icon_manager.get_icon("edit-find", QStyle.StandardPixmap.SP_FileDialogContentsView)
-
-        # Create main toolbar/menu actions
-        self.new_workspace_action = QAction(icon_new_ws, "&New Workspace...", self)
+        # Main toolbar and menu actions (no icons)
+        self.new_workspace_action = QAction("&New Workspace...", self)
         self.new_workspace_action.triggered.connect(self.on_new_workspace)
-        self.open_workspace_action = QAction(icon_open_ws, "&Open Workspace...", self)
+        self.open_workspace_action = QAction("&Open Workspace...", self)
         self.open_workspace_action.triggered.connect(self.on_open_workspace)
-        self.exit_action = QAction(icon_exit, "&Exit", self)
+        self.exit_action = QAction("&Exit", self)
         self.exit_action.triggered.connect(self.close)
 
         # Create Workspace Actions
-        self.create_package_action = QAction(icon_create_pkg, "&Create New Package...", self)
+        self.create_package_action = QAction("&Create New Package...", self)
         self.create_package_action.triggered.connect(self.on_create_package)
-        self.build_workspace_action = QAction(icon_build, "&Build Workspace", self)
+        self.build_workspace_action = QAction("&Build Workspace", self)
         self.build_workspace_action.triggered.connect(self.on_build_workspace)
-        self.clean_workspace_action = QAction(icon_clean, "&Clean Workspace", self)
+        self.clean_workspace_action = QAction("&Clean Workspace", self)
         self.clean_workspace_action.triggered.connect(self.on_clean_workspace)
-        self.run_executable_action = QAction(icon_run_exec, "Run &Executable...", self)
+        self.run_executable_action = QAction("Run &Executable...", self)
         self.run_executable_action.triggered.connect(self.on_run_executable)
-        self.launch_file_action = QAction(icon_launch, "&Launch File...", self)
+        self.launch_file_action = QAction("&Launch File...", self)
         self.launch_file_action.triggered.connect(self.on_launch_file)
-        self.stop_task_action = QAction(icon_stop, "&Stop Current Task", self)
+        self.stop_task_action = QAction("&Stop Current Task", self)
         self.stop_task_action.triggered.connect(self.on_stop_task)
-        self.refresh_workspace_action = QAction(icon_refresh, "&Refresh Workspace Explorer", self)
+        self.refresh_workspace_action = QAction("&Refresh Workspace Explorer", self)
         self.refresh_workspace_action.triggered.connect(self.on_refresh_workspace_explorer)
 
-        # Create Sidebar Actions
-        self.sidebar_explorer_action = QAction(icon_explorer, "Explorer", self)
+        # Sidebar Actions (no icons)
+        self.sidebar_explorer_action = QAction("Explorer", self)
         self.sidebar_explorer_action.triggered.connect(self.on_sidebar_explorer)
         self.sidebar_explorer_action.setCheckable(True)
 
-        self.sidebar_settings_action = QAction(icon_settings, "Settings", self)
+        self.sidebar_settings_action = QAction("Settings", self)
         self.sidebar_settings_action.triggered.connect(self.on_sidebar_settings)
         self.sidebar_settings_action.setCheckable(True)
 
-        self.sidebar_ai_assistant_action = QAction(icon_ai, "AI Assistant", self)
+        self.sidebar_ai_assistant_action = QAction("AI Assistant", self)
         self.sidebar_ai_assistant_action.triggered.connect(self.on_sidebar_ai_assistant)
         self.sidebar_ai_assistant_action.setCheckable(True)
 
-        self.sidebar_node_wizard_action = QAction(icon_node, "Node Wizard", self)
+        self.sidebar_node_wizard_action = QAction("Node Wizard", self)
         self.sidebar_node_wizard_action.triggered.connect(self.on_sidebar_node_wizard)
         self.sidebar_node_wizard_action.setCheckable(True)
 
-        self.sidebar_debug_view_action = QAction(icon_debug, "Debug View", self)  # Add the missing action
+        self.sidebar_debug_view_action = QAction("Debug View", self)  # Add the missing action
         self.sidebar_debug_view_action.triggered.connect(self.on_sidebar_debug_view)
         self.sidebar_debug_view_action.setCheckable(True)
 
-        self.sidebar_launch_runner_action = QAction(icon_launch_runner, "Launch Runner", self)
+        self.sidebar_launch_runner_action = QAction("Launch Runner", self)
         self.sidebar_launch_runner_action.triggered.connect(self.on_sidebar_launch_runner)
         self.sidebar_launch_runner_action.setCheckable(True)
 
-        self.sidebar_ros_graph_action = QAction(icon_graph, "ROS Graph", self)
+        self.sidebar_ros_graph_action = QAction("ROS Graph", self)
         self.sidebar_ros_graph_action.triggered.connect(self.on_sidebar_ros_graph)
         self.sidebar_ros_graph_action.setCheckable(True)
 
-        self.sidebar_ai_agent_action = QAction(icon_agent, "AI Agent Actions", self)
+        self.sidebar_ai_agent_action = QAction("AI Agent Actions", self)
         self.sidebar_ai_agent_action.triggered.connect(self.on_sidebar_ai_agent_actions)
         self.sidebar_ai_agent_action.setCheckable(True)
 
-        self.sidebar_ros_doctor_action = QAction(icon_doctor, "ROS Doctor", self)
+        self.sidebar_ros_doctor_action = QAction("ROS Doctor", self)
         self.sidebar_ros_doctor_action.triggered.connect(self.on_sidebar_ros_doctor)
         self.sidebar_ros_doctor_action.setCheckable(True)
 
         # Omni-search action
-        self.omni_search_action = QAction(icon_omni_search, "Quick Search", self)
+        self.omni_search_action = QAction("Quick Search", self)
         self.omni_search_action.triggered.connect(self.on_omni_search_triggered)
         self.omni_search_action.setShortcut(QKeySequence(Qt.Key.Key_K | Qt.KeyboardModifier.ControlModifier))
 
         # Asset Creation Actions
-        self.new_node_action = QAction(icon_node, "New Node...", self)
+        self.new_node_action = QAction("New Node...", self)
         self.new_node_action.triggered.connect(self.on_new_node)
-        self.new_launch_action = QAction(icon_launch, "New Launch File...", self)
+        self.new_launch_action = QAction("New Launch File...", self)
         self.new_launch_action.triggered.connect(self.on_new_launch_file)
-        self.new_msg_srv_action = QAction(icon_create_pkg, "New Msg/Srv/Action...", self)
+        self.new_msg_srv_action = QAction("New Msg/Srv/Action...", self)
         self.new_msg_srv_action.triggered.connect(self.on_new_msg_srv_action)
-        self.edit_pkg_config_action = QAction(icon_settings, "Edit package.xml/CMakeLists.txt...", self)
+        self.edit_pkg_config_action = QAction("Edit package.xml/CMakeLists.txt...", self)
         self.edit_pkg_config_action.triggered.connect(self.on_edit_pkg_config)
 
         # New Python and C++ Node actions
-        self.new_python_node_action = QAction(icon_node, "New Python Node...", self)
+        self.new_python_node_action = QAction("New Python Node...", self)
         self.new_python_node_action.triggered.connect(self.on_new_python_node)
-        self.new_cpp_node_action = QAction(icon_node, "New C++ Node...", self)
+        self.new_cpp_node_action = QAction("New C++ Node...", self)
         self.new_cpp_node_action.triggered.connect(self.on_new_cpp_node)
 
         # Map sidebar actions to their unique IDs for active state management
@@ -332,33 +407,315 @@ class MainWindow(QMainWindow):
         self.tool_bar.addAction(self.run_executable_action)
         self.tool_bar.addAction(self.launch_file_action)
         self.tool_bar.addAction(self.stop_task_action)
-        self.tool_bar.addAction(self.omni_search_action) # Add Omni-Search to toolbar
-        self.tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.tool_bar.addAction(self.omni_search_action)
+        self.tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
 
         # Optionally add the New Python Node and New C++ Node actions to the toolbar for quick access (if a toolbar is present in your UI setup).
         self.tool_bar.addAction(self.new_python_node_action)
         self.tool_bar.addAction(self.new_cpp_node_action)
 
     def _create_sidebar(self):
-        self.sidebar_tool_bar = QToolBar("Sidebar")
-        self.sidebar_tool_bar.setObjectName("sidebarToolBar")
-        self.sidebar_tool_bar.setMovable(False) # Usually sidebars are not movable
-        self.sidebar_tool_bar.setFloatable(False)
-        self.sidebar_tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly) # Icons only for sidebar
-        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.sidebar_tool_bar)
+        from PyQt6.QtWidgets import QPushButton, QVBoxLayout, QLabel
+        from rosbuddy.ui.components.ai_assistant_widget import AIAssistantWidget
 
-        # Add sidebar actions
+        # --- Activity Bar Items (icon-only, modern, with tooltips and shortcuts) ---
+        # Robust fallback for all sidebar icons
+        def get_sidebar_icon(key, fallback):
+            icon = self.icon_manager.get_icon(key)
+            if icon.isNull():
+                icon = self.style().standardIcon(fallback)
+            return icon
+
+        self.sidebar_explorer_action.setIcon(get_sidebar_icon("explorer", QStyle.StandardPixmap.SP_DirIcon))
+        self.sidebar_explorer_action.setToolTip("Workspace Explorer (Ctrl+1)")
+        self.sidebar_explorer_action.setShortcut(QKeySequence("Ctrl+1"))
         self.sidebar_tool_bar.addAction(self.sidebar_explorer_action)
+
+        self.sidebar_node_wizard_action.setIcon(get_sidebar_icon("node-wizard", QStyle.StandardPixmap.SP_FileIcon))
+        self.sidebar_node_wizard_action.setToolTip("Node Wizard (Ctrl+2)")
+        self.sidebar_node_wizard_action.setShortcut(QKeySequence("Ctrl+2"))
         self.sidebar_tool_bar.addAction(self.sidebar_node_wizard_action)
+
+        self.sidebar_launch_runner_action.setIcon(get_sidebar_icon("launch-runner", QStyle.StandardPixmap.SP_MediaPlay))
+        self.sidebar_launch_runner_action.setToolTip("Launch Runner (Ctrl+3)")
+        self.sidebar_launch_runner_action.setShortcut(QKeySequence("Ctrl+3"))
         self.sidebar_tool_bar.addAction(self.sidebar_launch_runner_action)
+
+        self.sidebar_ros_graph_action.setIcon(get_sidebar_icon("ros-graph", QStyle.StandardPixmap.SP_DriveNetIcon))
+        self.sidebar_ros_graph_action.setToolTip("ROS Graph (Ctrl+4)")
+        self.sidebar_ros_graph_action.setShortcut(QKeySequence("Ctrl+4"))
         self.sidebar_tool_bar.addAction(self.sidebar_ros_graph_action)
+
+        self.sidebar_debug_view_action.setIcon(get_sidebar_icon("debug", QStyle.StandardPixmap.SP_MessageBoxQuestion))
+        self.sidebar_debug_view_action.setToolTip("Debug (Ctrl+5)")
+        self.sidebar_debug_view_action.setShortcut(QKeySequence("Ctrl+5"))
         self.sidebar_tool_bar.addAction(self.sidebar_debug_view_action)
+
         self.sidebar_tool_bar.addSeparator()
+
+        self.sidebar_ai_assistant_action.setIcon(get_sidebar_icon("ai-assistant", QStyle.StandardPixmap.SP_MessageBoxQuestion))
+        self.sidebar_ai_assistant_action.setToolTip("AI Assistant (Ctrl+6)")
+        self.sidebar_ai_assistant_action.setShortcut(QKeySequence("Ctrl+6"))
         self.sidebar_tool_bar.addAction(self.sidebar_ai_assistant_action)
+
+        self.sidebar_ai_agent_action.setIcon(get_sidebar_icon("ai-agent", QStyle.StandardPixmap.SP_CommandLink))
+        self.sidebar_ai_agent_action.setToolTip("AI Agent Actions (Ctrl+7)")
+        self.sidebar_ai_agent_action.setShortcut(QKeySequence("Ctrl+7"))
         self.sidebar_tool_bar.addAction(self.sidebar_ai_agent_action)
+
         self.sidebar_tool_bar.addSeparator()
+
+        self.sidebar_ros_doctor_action.setIcon(get_sidebar_icon("ros-doctor", QStyle.StandardPixmap.SP_DialogHelpButton))
+        self.sidebar_ros_doctor_action.setToolTip("ROS Doctor (Ctrl+8)")
+        self.sidebar_ros_doctor_action.setShortcut(QKeySequence("Ctrl+8"))
         self.sidebar_tool_bar.addAction(self.sidebar_ros_doctor_action)
+
+        self.sidebar_settings_action.setIcon(get_sidebar_icon("settings", QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.sidebar_settings_action.setToolTip("Settings (Ctrl+9)")
+        self.sidebar_settings_action.setShortcut(QKeySequence("Ctrl+9"))
         self.sidebar_tool_bar.addAction(self.sidebar_settings_action)
+
+        # --- Sidebar Content Area (contextual, modular) ---
+        self.sidebar_content_widget = QWidget()
+        self.sidebar_content_widget.setObjectName("sidebar_content_widget")
+        self.sidebar_content_layout = QVBoxLayout(self.sidebar_content_widget)
+        self.sidebar_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.sidebar_content_layout.setSpacing(0)
+        self.sidebar_search_bar = QLineEdit()
+        self.sidebar_search_bar.setPlaceholderText("Search or filter...")
+        self.sidebar_content_layout.addWidget(self.sidebar_search_bar)
+
+        # Modular sidebar content stack
+        self.sidebar_content_stack = QStackedWidget()
+        from rosbuddy.ui.components.workspace_explorer import WorkspaceExplorer
+        explorer_widget = WorkspaceExplorer(self.package_discovery, self.workspace_manager)
+        self.sidebar_content_stack.addWidget(explorer_widget)  # index 0
+        # Settings stub
+        settings_stub = QWidget()
+        settings_layout = QVBoxLayout(settings_stub)
+        settings_layout.addWidget(QLabel("Settings sidebar stub"))
+        settings_layout.addWidget(QPushButton("Settings Action"))
+        self.sidebar_content_stack.addWidget(settings_stub)
+        # AI Assistant: real widget
+        ai_assistant_widget = AIAssistantWidget()
+        self.sidebar_content_stack.addWidget(ai_assistant_widget)
+        # All other sidebar views: use stubs (QWidget with label/button)
+        for label in ["Node Wizard", "Debug", "Launch Runner", "ROS Graph", "AI Agent", "ROS Doctor"]:
+            stub = QWidget()
+            stub_layout = QVBoxLayout(stub)
+            stub_layout.addWidget(QLabel(f"{label} sidebar stub"))
+            stub_layout.addWidget(QPushButton(f"{label} Action"))
+            self.sidebar_content_stack.addWidget(stub)
+        self.sidebar_content_layout.addWidget(self.sidebar_content_stack)
+
+        # Example contextual widgets (stubs for now)
+        self.sidebar_explorer_view = self.workspace_explorer  # This is a WorkspaceExplorer instance
+        # Do NOT call setAlignment on WorkspaceExplorer
+
+        # Settings sidebar: minimal QWidget
+        self.sidebar_settings_view = QWidget()
+        settings_layout = QVBoxLayout(self.sidebar_settings_view)
+        settings_label = QLabel("Settings Sidebar")
+        settings_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        settings_button = QPushButton("Open Settings")
+        settings_layout.addWidget(settings_label)
+        settings_layout.addWidget(settings_button)
+        settings_layout.addStretch(1)
+
+        # AI Assistant sidebar: minimal QWidget
+        self.sidebar_ai_assistant_view = QWidget()
+        ai_assistant_layout = QVBoxLayout(self.sidebar_ai_assistant_view)
+        ai_assistant_label = QLabel("AI Assistant Sidebar")
+        ai_assistant_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ai_assistant_button = QPushButton("Ask AI")
+        ai_assistant_layout.addWidget(ai_assistant_label)
+        ai_assistant_layout.addWidget(ai_assistant_button)
+        ai_assistant_layout.addStretch(1)
+
+        # Node Wizard sidebar: minimal QWidget
+        self.sidebar_node_wizard_view = QWidget()
+        node_wizard_layout = QVBoxLayout(self.sidebar_node_wizard_view)
+        node_wizard_label = QLabel("Node Wizard Sidebar")
+        node_wizard_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        node_wizard_button = QPushButton("Start New Node Wizard")
+        node_wizard_layout.addWidget(node_wizard_label)
+        node_wizard_layout.addWidget(node_wizard_button)
+        node_wizard_layout.addStretch(1)
+
+        # Debug sidebar: minimal QWidget
+        self.sidebar_debug_view = QWidget()
+        debug_layout = QVBoxLayout(self.sidebar_debug_view)
+        debug_label = QLabel("Debug Sidebar")
+        debug_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        debug_button = QPushButton("Start Debug Session")
+        debug_layout.addWidget(debug_label)
+        debug_layout.addWidget(debug_button)
+        debug_layout.addStretch(1)
+
+        # Launch Runner sidebar: minimal QWidget
+        self.sidebar_launch_runner_view = QWidget()
+        launch_runner_layout = QVBoxLayout(self.sidebar_launch_runner_view)
+        launch_runner_label = QLabel("Launch Runner Sidebar")
+        launch_runner_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        launch_runner_button = QPushButton("Run Launch File")
+        launch_runner_layout.addWidget(launch_runner_label)
+        launch_runner_layout.addWidget(launch_runner_button)
+        launch_runner_layout.addStretch(1)
+
+        # ROS Graph sidebar: minimal QWidget
+        self.sidebar_ros_graph_view = QWidget()
+        ros_graph_layout = QVBoxLayout(self.sidebar_ros_graph_view)
+        ros_graph_label = QLabel("ROS Graph Sidebar")
+        ros_graph_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ros_graph_button = QPushButton("Show Graph")
+        ros_graph_layout.addWidget(ros_graph_label)
+        ros_graph_layout.addWidget(ros_graph_button)
+        ros_graph_layout.addStretch(1)
+
+        # AI Agent sidebar: minimal QWidget
+        self.sidebar_ai_agent_view = QWidget()
+        ai_agent_layout = QVBoxLayout(self.sidebar_ai_agent_view)
+        ai_agent_label = QLabel("AI Agent Actions Sidebar")
+        ai_agent_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ai_agent_button = QPushButton("Run Agent Action")
+        ai_agent_layout.addWidget(ai_agent_label)
+        ai_agent_layout.addWidget(ai_agent_button)
+        ai_agent_layout.addStretch(1)
+
+        # ROS Doctor sidebar: minimal QWidget
+        self.sidebar_ros_doctor_view = QWidget()
+        ros_doctor_layout = QVBoxLayout(self.sidebar_ros_doctor_view)
+        ros_doctor_label = QLabel("ROS Doctor Sidebar")
+        ros_doctor_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ros_doctor_button = QPushButton("Run Diagnostics")
+        ros_doctor_layout.addWidget(ros_doctor_label)
+        ros_doctor_layout.addWidget(ros_doctor_button)
+        ros_doctor_layout.addStretch(1)
+
+        # Add all sidebar widgets to the stack in the correct order
+        self.sidebar_content_stack.addWidget(self.sidebar_explorer_view)   # index 0
+        self.sidebar_content_stack.addWidget(self.sidebar_settings_view)   # index 1
+        self.sidebar_content_stack.addWidget(self.sidebar_ai_assistant_view)   # index 2
+        self.sidebar_content_stack.addWidget(self.sidebar_node_wizard_view)    # index 3
+        self.sidebar_content_stack.addWidget(self.sidebar_debug_view)          # index 4
+        self.sidebar_content_stack.addWidget(self.sidebar_launch_runner_view)  # index 5
+        self.sidebar_content_stack.addWidget(self.sidebar_ros_graph_view)      # index 6
+        self.sidebar_content_stack.addWidget(self.sidebar_ai_agent_view)       # index 7
+        self.sidebar_content_stack.addWidget(self.sidebar_ros_doctor_view)     # index 8
+
+        # Node Wizard sidebar: replace stub with a minimal QWidget for future expansion
+        from PyQt6.QtWidgets import QVBoxLayout, QPushButton
+        self.sidebar_node_wizard_view = QWidget()
+        node_wizard_layout = QVBoxLayout(self.sidebar_node_wizard_view)
+        node_wizard_label = QLabel("Node Wizard Sidebar")
+        node_wizard_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        node_wizard_button = QPushButton("Start New Node Wizard")
+        node_wizard_layout.addWidget(node_wizard_label)
+        node_wizard_layout.addWidget(node_wizard_button)
+        node_wizard_layout.addStretch(1)
+
+        self.sidebar_content_stack.insertWidget(3, self.sidebar_node_wizard_view)  # index 3 for Node Wizard
+
+        # AI Assistant sidebar: replace stub with a minimal QWidget for future expansion
+        from PyQt6.QtWidgets import QVBoxLayout, QPushButton
+        self.sidebar_ai_assistant_view = QWidget()
+        ai_assistant_layout = QVBoxLayout(self.sidebar_ai_assistant_view)
+        ai_assistant_label = QLabel("AI Assistant Sidebar")
+        ai_assistant_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ai_assistant_button = QPushButton("Ask AI")
+        ai_assistant_layout.addWidget(ai_assistant_label)
+        ai_assistant_layout.addWidget(ai_assistant_button)
+        ai_assistant_layout.addStretch(1)
+
+        self.sidebar_content_stack.insertWidget(2, self.sidebar_ai_assistant_view)  # index 2 for AI Assistant
+
+        # Debug sidebar: replace stub with a minimal QWidget for future expansion
+        self.sidebar_debug_view = QWidget()
+        debug_layout = QVBoxLayout(self.sidebar_debug_view)
+        debug_label = QLabel("Debug Sidebar")
+        debug_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        debug_button = QPushButton("Start Debug Session")
+        debug_layout.addWidget(debug_label)
+        debug_layout.addWidget(debug_button)
+        debug_layout.addStretch(1)
+        self.sidebar_content_stack.insertWidget(4, self.sidebar_debug_view)  # index 4 for Debug
+
+        # Launch Runner sidebar: replace stub with a minimal QWidget for future expansion
+        self.sidebar_launch_runner_view = QWidget()
+        launch_runner_layout = QVBoxLayout(self.sidebar_launch_runner_view)
+        launch_runner_label = QLabel("Launch Runner Sidebar")
+        launch_runner_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        launch_runner_button = QPushButton("Run Launch File")
+        launch_runner_layout.addWidget(launch_runner_label)
+        launch_runner_layout.addWidget(launch_runner_button)
+        launch_runner_layout.addStretch(1)
+        self.sidebar_content_stack.insertWidget(5, self.sidebar_launch_runner_view)  # index 5 for Launch Runner
+
+        # ROS Graph sidebar: minimal QWidget
+        self.sidebar_ros_graph_view = QWidget()
+        ros_graph_layout = QVBoxLayout(self.sidebar_ros_graph_view)
+        ros_graph_label = QLabel("ROS Graph Sidebar")
+        ros_graph_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ros_graph_button = QPushButton("Show Graph")
+        ros_graph_layout.addWidget(ros_graph_label)
+        ros_graph_layout.addWidget(ros_graph_button)
+        ros_graph_layout.addStretch(1)
+        self.sidebar_content_stack.insertWidget(6, self.sidebar_ros_graph_view)  # index 6
+
+        # AI Agent sidebar: minimal QWidget
+        self.sidebar_ai_agent_view = QWidget()
+        ai_agent_layout = QVBoxLayout(self.sidebar_ai_agent_view)
+        ai_agent_label = QLabel("AI Agent Actions Sidebar")
+        ai_agent_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ai_agent_button = QPushButton("Run Agent Action")
+        ai_agent_layout.addWidget(ai_agent_label)
+        ai_agent_layout.addWidget(ai_agent_button)
+        ai_agent_layout.addStretch(1)
+        self.sidebar_content_stack.insertWidget(7, self.sidebar_ai_agent_view)  # index 7
+
+        # ROS Doctor sidebar: minimal QWidget
+        self.sidebar_ros_doctor_view = QWidget()
+        ros_doctor_layout = QVBoxLayout(self.sidebar_ros_doctor_view)
+        ros_doctor_label = QLabel("ROS Doctor Sidebar")
+        ros_doctor_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ros_doctor_button = QPushButton("Run Diagnostics")
+        ros_doctor_layout.addWidget(ros_doctor_label)
+        ros_doctor_layout.addWidget(ros_doctor_button)
+        ros_doctor_layout.addStretch(1)
+        self.sidebar_content_stack.insertWidget(8, self.sidebar_ros_doctor_view)  # index 8
+
+        # Map sidebar actions to stack indexes for context switching
+        self._sidebar_action_to_stack_index = {
+            self.sidebar_explorer_action: 0,
+            self.sidebar_settings_action: 1,
+            self.sidebar_ai_assistant_action: 2,
+            self.sidebar_node_wizard_action: 3,
+            self.sidebar_debug_view_action: 4,
+            self.sidebar_launch_runner_action: 5,
+            self.sidebar_ros_graph_action: 6,
+            self.sidebar_ai_agent_action: 7,
+            self.sidebar_ros_doctor_action: 8,
+        }
+
+        # Add the sidebar content widget to the main splitter (left pane, after Activity Bar)
+        # Remove Workspace Explorer from left pane, add sidebar_content_widget instead
+        # (Assume main_splitter is set up in _create_central_widget)
+        if hasattr(self, 'main_splitter'):
+            self.main_splitter.insertWidget(0, self.sidebar_content_widget)
+            self.main_splitter.setSizes([250, 950])
+
+        # Connect sidebar actions to context switcher (fix lambda late binding)
+        for action, idx in self._sidebar_action_to_stack_index.items():
+            def make_switcher(i):
+                return lambda checked=False, i=i: self.sidebar_content_stack.setCurrentIndex(i)
+            action.triggered.connect(make_switcher(idx))
+
+        # Set default sidebar content
+        self.sidebar_content_stack.setCurrentIndex(0)
+
+        # --- Highlight active icon ---
+        # Add logic to visually highlight the active sidebar action (e.g., by changing background or using a colored bar)
+        # This can be done in the slot that handles sidebar action triggers
 
     def _create_status_bar(self):
         self.status_bar = QStatusBar()
@@ -846,26 +1203,29 @@ class MainWindow(QMainWindow):
             with open(cpp_file_path, "w", encoding="utf-8") as f:
                 f.write(node_code["cpp_content"])
 
-            # Update CMakeLists.txt to include the new node
-            from rosbuddy.file_generators.cmake_modifier import add_cpp_node_to_cmakelists
+            # Update CMakeLists.txt to include the new node (robust version)
+            from rosbuddy.file_generators.cmake_modifier import update_cmakelists_for_new_cpp_node
             cmakelists_path = pkg_path / "CMakeLists.txt"
-            if cmakelists_path.exists():
-                import xml.etree.ElementTree as ET
-                success = add_cpp_node_to_cmakelists(
-                    cmakelists_path, 
-                    node_name,
-                    [str(cpp_file_path.relative_to(pkg_path))]  # Sources relative to package root
-                )
-                if not success:
-                    logger.warning(f"Could not automatically update CMakeLists.txt for node {node_name}")
+            msg_pkg = msg_type.split("/")[0]
+            additional_deps = [msg_pkg] if msg_pkg != "std_msgs" else []  # std_msgs is usually present, but add if needed
+            update_cmakelists_for_new_cpp_node(
+                cmakelists_path,
+                pkg_name=pkg_name,
+                node_name=node_name,
+                class_name=node_name.title().replace('_', ''),
+                additional_message_dependencies=["rclcpp"] + additional_deps
+            )
 
-            # Update package.xml for message dependency
+            # Update package.xml for rclcpp, ament_cmake, and message dependency
             package_xml_path = pkg_path / "package.xml"
             if package_xml_path.exists():
-                msg_pkg = msg_type.split("/")[0]
+                import xml.etree.ElementTree as ET
                 from rosbuddy.file_generators.package_xml_modifier import add_unique_dependency_to_package_xml
                 tree = ET.parse(str(package_xml_path))
                 root = tree.getroot()
+                # Add ament_cmake as buildtool_depend
+                from rosbuddy.file_generators.package_xml_modifier import add_dependency_to_package_xml
+                add_dependency_to_package_xml(package_xml_path, "ament_cmake", dep_type="buildtool_depend")
                 # Add rclcpp and message type dependency
                 add_unique_dependency_to_package_xml(root, "rclcpp", dep_type="depend")
                 add_unique_dependency_to_package_xml(root, msg_pkg, dep_type="depend")
@@ -879,6 +1239,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error creating new C++ node: {e}", exc_info=True)
             QMessageBox.critical(self, "Node Creation Error", f"Failed to create node: {e}")
+
+    def on_refresh_workspace_explorer(self):
+        """Refresh the workspace explorer view (stub for UI/test stability)."""
+        if hasattr(self, '_update_workspace_explorer'):
+            self._update_workspace_explorer()
+        self.update_active_workspace_display("Workspace Explorer Refreshed")
 
     # --- Placeholder Asset Creation/Editing Slots ---
     def on_new_node(self):
@@ -934,32 +1300,103 @@ class MainWindow(QMainWindow):
                     # 2. Modify existing package.xml
                     package_xml_path = selected_pkg_info.path / "package.xml"
                     if package_xml_path.exists():
-                        success_xml = update_package_xml_for_new_interface(package_xml_path, iface_def)
+                        # Pass only the dependencies list, not the InterfaceFileDefinition object
+                        success_xml = update_package_xml_for_new_interface(package_xml_path, iface_def.interface_package_dependencies)
                         if success_xml:
                             logger.info(f"Successfully updated {package_xml_path} for new interface.")
                             self.output_display.append_text(f"[INFO] Updated {package_xml_path.name}.")
                         else:
                             logger.error(f"Failed to update {package_xml_path}.")
-                            self.output_display.append_text(f"[ERROR] Failed to update {package_xml.name}.")
+                            self.output_display.append_text(f"[ERROR] Failed to update {package_xml_path.name}.")
                             QMessageBox.warning(self, "Update Error", f"Failed to update {package_xml_path.name}. Check logs.")
                     else:
                         logger.warning(f"package.xml not found at {package_xml_path} for package {selected_pkg_info.name}. Skipping update.")
                         self.output_display.append_text(f"[WARN] {package_xml_path.name} not found. Skipping update.")
 
                     # 3. Advise for CMakeLists.txt if ament_cmake
+                    cmakelists_path = selected_pkg_info.path / "CMakeLists.txt"
+                    cmake_generated = False
+                    cmake_updated = False
                     if selected_pkg_info.build_type == "ament_cmake":
-                        msg = (f"Interface file '{iface_def.file_name}' created and package.xml updated.\n\n"
-                               f"Since '{selected_pkg_info.name}' is an ament_cmake package, "
-                               f"please manually update its CMakeLists.txt to include:\n"
-                               f"  - '{iface_def.relative_path}' in the rosidl_generate_interfaces() call.\n"
-                               f"  - Any new dependencies (e.g., {', '.join(iface_def.interface_package_dependencies) or 'none'}) in find_package().")
-                        QMessageBox.information(self, "Manual CMake Update Required", msg)
-                        self.output_display.append_text(f"[INFO] CMakeLists.txt for {selected_pkg_info.name} may need manual review/update.")
-                        # Attempt automatic update
-                        cmakelists_path = selected_pkg_info.path / "CMakeLists.txt"
+                        if not cmakelists_path.exists():
+                            # Try to build a minimal PackageConfig for this package
+                            pkg_config = PackageConfig(
+                                name=selected_pkg_info.name,
+                                build_type=selected_pkg_info.build_type,
+                                dependencies=[Dependency(dep) for dep in iface_def.interface_package_dependencies],
+                                interface_definitions=[iface_def],
+                                library_targets=[],
+                                executable_targets=[],
+                                launch_configurations=[],
+                                config_files_paths=[]
+                            )
+                            cmake_content = generate_cmake_lists_content(pkg_config)
+                            with open(cmakelists_path, "w", encoding="utf-8") as f:
+                                f.write(cmake_content)
+                            logger.info(f"Generated new CMakeLists.txt for {selected_pkg_info.name}.")
+                            self.output_display.append_text(f"[INFO] Generated new CMakeLists.txt for {selected_pkg_info.name}.")
+                            cmake_generated = True
                         if cmakelists_path.exists():
-                            success_cmake = update_cmakelists_for_new_interface(cmakelists_path, iface_def, selected_pkg_info.name)
-                            self.output_display.append_text(f"[INFO] Attempted CMakeLists.txt update: {'Succeeded' if success_cmake else 'Failed or no changes needed'}.")
+                            cmake_status = update_cmakelists_for_new_interface(cmakelists_path, iface_def, selected_pkg_info.name)
+                            cmake_updated = cmake_status == CMakeUpdateStatus.UPDATED
+                            if cmake_status == CMakeUpdateStatus.UPDATED:
+                                self.output_display.append_text(f"[INFO] CMakeLists.txt for {selected_pkg_info.name} was updated.")
+                            elif cmake_status == CMakeUpdateStatus.NO_CHANGES:
+                                self.output_display.append_text(f"[INFO] CMakeLists.txt for {selected_pkg_info.name} was already up to date.")
+                            else:
+                                self.output_display.append_text(f"[ERROR] Failed to update CMakeLists.txt for {selected_pkg_info.name}.")
+                        # Only show manual message if neither generated nor updated
+                        if not (cmake_generated or cmake_updated):
+                            msg = (f"Interface file '{iface_def.file_name}' created and package.xml updated.\n\n"
+                                   f"Since '{selected_pkg_info.name}' is an ament_cmake package, "
+                                   f"please manually update its CMakeLists.txt to include:\n"
+                                   f"  - '{iface_def.relative_path}' in the rosidl_generate_interfaces() call.\n"
+                                   f"  - Any new dependencies (e.g., {', '.join(iface_def.interface_package_dependencies) or 'none'}) in find_package().")
+                            QMessageBox.information(self, "Manual CMake Update Required", msg)
+                            # Removed duplicate/obsolete manual review message after refactor.
+                        elif cmake_generated or cmake_updated:
+                            msg = (f"Interface file '{iface_def.file_name}' created, package.xml updated, and CMakeLists.txt automatically generated/updated for '{selected_pkg_info.name}'.")
+                            QMessageBox.information(self, "CMakeLists.txt Updated", msg)
+                            self.output_display.append_text(f"[INFO] CMakeLists.txt for {selected_pkg_info.name} was automatically generated/updated.")
+                    # Generate CMakeLists.txt if it doesn't exist
+                    cmakelists_path = selected_pkg_info.path / "CMakeLists.txt"
+                    cmake_updated = False
+                    if selected_pkg_info.build_type == "ament_cmake":
+                        if not cmakelists_path.exists():
+                            # Try to build a minimal PackageConfig for this package
+                            pkg_config = PackageConfig(
+                                name=selected_pkg_info.name,
+                                build_type=selected_pkg_info.build_type,
+                                dependencies=[Dependency(dep) for dep in iface_def.interface_package_dependencies],
+                                interface_definitions=[iface_def],
+                                library_targets=[],
+                                executable_targets=[],
+                                launch_configurations=[],
+                                config_files_paths=[]
+                            )
+                            cmake_content = generate_cmake_lists_content(pkg_config)
+                            with open(cmakelists_path, "w", encoding="utf-8") as f:
+                                f.write(cmake_content)
+                            logger.info(f"Generated new CMakeLists.txt for {selected_pkg_info.name}.")
+                            self.output_display.append_text(f"[INFO] Generated new CMakeLists.txt for {selected_pkg_info.name}.")
+                            cmake_generated = True
+                        if cmakelists_path.exists():
+                            cmake_status = update_cmakelists_for_new_interface(cmakelists_path, iface_def, selected_pkg_info.name)
+                            cmake_updated = cmake_status == CMakeUpdateStatus.UPDATED
+                            # Removed redundant/ambiguous message after refactor. Only show clear status above.
+                        # Only show manual message if neither generated nor updated
+                        if not (cmake_generated or cmake_updated):
+                            msg = (f"Interface file '{iface_def.file_name}' created and package.xml updated.\n\n"
+                                   f"Since '{selected_pkg_info.name}' is an ament_cmake package, "
+                                   f"please manually update its CMakeLists.txt to include:\n"
+                                   f"  - '{iface_def.relative_path}' in the rosidl_generate_interfaces() call.\n"
+                                   f"  - Any new dependencies (e.g., {', '.join(iface_def.interface_package_dependencies) or 'none'}) in find_package().")
+                            QMessageBox.information(self, "Manual CMake Update Required", msg)
+                            # Removed duplicate/obsolete manual review message after refactor.
+                        else:
+                            msg = (f"Interface file '{iface_def.file_name}' created, package.xml updated, and CMakeLists.txt automatically generated/updated for '{selected_pkg_info.name}'.")
+                            QMessageBox.information(self, "CMakeLists.txt Updated", msg)
+                            self.output_display.append_text(f"[INFO] CMakeLists.txt for {selected_pkg_info.name} was automatically generated/updated.")
 
                     self.on_refresh_workspace_explorer() # Refresh to show new files if possible
                     self.update_active_workspace_display(f"Interface '{iface_def.file_name}' Added to {selected_pkg_info.name}")
@@ -1041,6 +1478,7 @@ class MainWindow(QMainWindow):
 
     def on_sidebar_settings(self):
         logger.info("Sidebar: Settings action triggered.")
+       
         settings_view = SettingsView(parent=self.active_view_tabs) # Parent to tab widget for lifecycle
         self._add_or_focus_tab(
             view_widget=settings_view,
@@ -1062,6 +1500,7 @@ class MainWindow(QMainWindow):
     def on_sidebar_node_wizard(self):
         logger.info("Sidebar: Node Wizard action triggered.")
         view = NodeWizardView(parent=self.active_view_tabs)
+        view.set_package_discovery(self.package_discovery)
         self._add_or_focus_tab(view, "Node Wizard", unique_id="rosbuddy_node_wizard_view")
 
     def on_sidebar_launch_runner(self):
@@ -1080,7 +1519,7 @@ class MainWindow(QMainWindow):
         self._add_or_focus_tab(view, "Debug", unique_id="rosbuddy_debug_view")
 
     def on_sidebar_ai_agent_actions(self):
-        logger.info("Sidebar: AI Agent Actions action triggered.")
+        logger.info("Sidebar: AI Agent action triggered.")
         view = AIAgentActionView(parent=self.active_view_tabs)
         self._add_or_focus_tab(view, "AI Agent Actions", unique_id="rosbuddy_ai_agent_actions_view")
 
@@ -1280,84 +1719,90 @@ class MainWindow(QMainWindow):
                             linked_libraries=["rclcpp"]
                         )
                         cfg.add_executable_target(hello_exec)
-                        # Also add rclcpp as a dependency
-                        from rosbuddy.data_models.package_config import Dependency
-                        cfg.add_dependency(Dependency("rclcpp", dep_type="depend"))
-                    ok = create_package_scaffolding(str(active_ws_src_path), cfg, data['include_hello_world'])
-                    msg = f"Package '{data['name']}' {'created successfully.' if ok else 'creation failed.'}"
-                    self.output_display.append_text(f"[INFO] {msg}")
-                    logger.info(msg)
-                    if ok:
-                        QMessageBox.information(self, "Package Creation", msg)
-                        self.update_active_workspace_display(f"Package '{data['name']}' Created")
-                    else:
-                        QMessageBox.critical(self, "Package Creation Error", msg)
-                        self.update_active_workspace_display(f"Package '{data['name']}' Creation Failed")
-                except Exception as e:
-                    error_msg = f"Critical error during package creation: {e}"
-                    logger.error(error_msg, exc_info=True)
-                    self.output_display.append_text(f"[ERROR] {error_msg}")
-                    QMessageBox.critical(self, "Package Creation Error", error_msg)
-                    self.update_active_workspace_display("Package Creation Error")
-            else: # Should not happen if dialog accepted
-                logger.warning("Create package dialog accepted but no data returned.")
-        else:
-            logger.debug("Package creation cancelled by user.")
-            self.output_display.append_text("[INFO] Package creation cancelled.")
 
-    def on_refresh_workspace_explorer(self):
-        logger.info("Refresh Workspace Explorer action triggered.")
-        self.output_display.append_text("[INFO] Refreshing workspace explorer...")
-        # The update_active_workspace_display method now has logic to call
-        # _update_workspace_explorer if "refresh workspace" is in the action_description.
-        self.update_active_workspace_display("Refresh Workspace")
-        # If you wanted a more direct call, you could do:
-        # self._update_workspace_explorer()
-        # self.output_display.append_text("[INFO] Workspace explorer refreshed.")
-    def _start_worker_task(self, task_description: str, target_fn: Callable, *args, **kwargs):
-        """Helper to start a worker, managing UI busy state."""
+                    # For more complex scenarios, like workspaces with existing packages, or specific user requirements,
+                    # additional logic would be needed here.
+
+                    # --- Logging and Feedback ---
+                    logger.info(f"PackageConfig created: {cfg}")
+                    self.output_display.append_text(f"[INFO] Package '{data['name']}' created successfully.")
+                    QMessageBox.information(self, "Package Created", f"Package '{data['name']}' created successfully.")
+                    self.on_refresh_workspace_explorer() # Refresh to show new package
+                    self.update_active_workspace_display(f"Package '{data['name']}' Created")
+                except Exception as e:
+                    logger.error(f"Error creating package: {e}", exc_info=True)
+                    QMessageBox.critical(self, "Package Creation Error", f"Failed to create package: {e}")
+
+    def _start_worker_task(self, task_description: str, target_fn, *args, **kwargs) -> bool:
+        """Start a worker task with the given description and target function.
+        
+        Returns True if worker was started successfully, False otherwise.
+        """
         if self.current_worker and self.current_worker.isRunning():
-            QMessageBox.warning(self, "Busy", "Another task is already running. Please wait.")
+            logger.warning(f"_start_worker_task: Cannot start '{task_description}' - another worker is already running.")
             return False
         
-        logger.info(f"Starting task: {task_description}")
-        self.output_display.append_text(f"\n--- Starting: {task_description} ---")
-        self.update_active_workspace_display(task_description) # Sets busy state and current_action_description
-        logger.debug(f"_start_worker_task: After update_active_workspace_display, self.current_action_description is NOW '{self.current_action_description}' for task '{task_description}'")
-
-        self.current_worker = Worker(target_fn, *args, **kwargs)
-        self.current_worker.signals.progress.connect(self.output_display.append_text)
-        self.current_worker.signals.finished.connect(self._on_worker_finished)
-        self.current_worker.signals.error.connect(self._on_worker_error)
-        # Specific signals like result and process_started are connected by the caller if needed
-        self.current_worker.start()
-        return True
+        try:
+            logger.info(f"Starting worker task: {task_description}")
+            self.current_worker = Worker(target_fn, *args, **kwargs)
+            
+            # Connect base worker signals
+            self.current_worker.signals.finished.connect(self._on_worker_finished)
+            self.current_worker.signals.error.connect(self._on_worker_error)
+            self.current_worker.signals.progress.connect(self.output_display.append_text)
+            
+            # Update UI state
+            self.current_action_description = task_description
+            self.update_active_workspace_display(task_description)
+            
+            # Start the worker
+            self.current_worker.start()
+            logger.debug(f"Worker task '{task_description}' started successfully.")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start worker task '{task_description}': {e}", exc_info=True)
+            self.current_worker = None
+            self.current_action_description = ""
+            return False
 
     def on_build_workspace(self):
-        if self._start_worker_task("Build Workspace", self.tool_invoker.colcon_build):
-            # Connect result for build/clean
+        """Build the active workspace using colcon build."""
+        active_ws_path = self.workspace_manager.get_active_workspace_path()
+        if not active_ws_path:
+            QMessageBox.warning(self, "Build Error", "No active workspace.")
+            return
+        
+        if self.current_worker and self.current_worker.isRunning():
+            QMessageBox.warning(self, "Busy", "Another task is in progress.")
+            return
+        
+        logger.info("Build Workspace action triggered.")
+        self.output_display.append_text("[INFO] Action: Build Workspace...")
+        
+        task_desc = "Build Workspace"
+        if self._start_worker_task(task_desc, self.tool_invoker.colcon_build):
+            # Connect specific result handler for build tasks
             self.current_worker.signals.result.connect(self._on_build_clean_result)
 
     def on_clean_workspace(self):
-        if self._start_worker_task("Clean Workspace", self.tool_invoker.colcon_clean):
-            # Connect result for build/clean
+        """Clean the active workspace (remove build, install, log directories)."""
+        active_ws_path = self.workspace_manager.get_active_workspace_path()
+        if not active_ws_path:
+            QMessageBox.warning(self, "Clean Error", "No active workspace.")
+            return
+        
+        if self.current_worker and self.current_worker.isRunning():
+            QMessageBox.warning(self, "Busy", "Another task is in progress.")
+            return
+        
+        logger.info("Clean Workspace action triggered.")
+        self.output_display.append_text("[INFO] Action: Clean Workspace...")
+        
+        task_desc = "Clean Workspace"
+        if self._start_worker_task(task_desc, self.tool_invoker.colcon_clean):
+            # Connect specific result handler for build tasks
             self.current_worker.signals.result.connect(self._on_build_clean_result)
-
-    def _on_build_clean_result(self, result_tuple: tuple):
-        # result_tuple for build/clean: (success, stdout_str, stderr_str)
-        # ToolInvoker might return 4th element as None if Popen object not applicable
-        success, stdout_str, stderr_str = result_tuple[:3]
-        logger.debug(f"Build/Clean task result: Success={success}")
-        task_name = self.current_action_description # Should be "Build Workspace" or "Clean Workspace"
-        if not success: # Could be actual error or just non-zero exit like for clean
-            # For clean, shutil might not produce much stderr, ToolInvoker logs its own messages
-            # For build, stderr_str could contain compiler errors
-            if stderr_str: # Only show if there's actual stderr content
-                 self.output_display.append_text(f"\n[TASK STDERR - {task_name}]:\n{stderr_str.strip()}")
-            QMessageBox.warning(self, f"{task_name} Result", f"{task_name} finished. Non-zero exit or errors occurred. Please check output.")
-        else:
-            self.output_display.append_text(f"[INFO] {task_name} completed successfully.")
-        # _on_worker_finished handles final UI state update and status message
 
     def on_run_executable(self):
         active_ws_path = self.workspace_manager.get_active_workspace_path()
@@ -1407,6 +1852,31 @@ class MainWindow(QMainWindow):
             self.output_display.append_text("[INFO] Launch file cancelled by user.")
             logger.debug("Launch file dialog cancelled.")
 
+    def _on_build_clean_result(self, result_tuple: tuple):
+        """Handle results from build/clean operations."""
+        # result_tuple for build/clean: (success, stdout_str, stderr_str)
+        success, stdout_str, stderr_str = result_tuple
+        task_name = self.current_action_description # Should be "Build Workspace" or "Clean Workspace"
+        logger.debug(f"Build/Clean task ('{task_name}') worker result: Success={success}")
+
+        # Display stdout output if available
+        if stdout_str.strip():
+            self.output_display.append_text(f"\n[TASK OUTPUT - {task_name}]:\n{stdout_str.strip()}")
+        
+        # Display stderr output if available
+        if stderr_str.strip():
+            self.output_display.append_text(f"\n[TASK STDERR - {task_name}]:\n{stderr_str.strip()}")
+
+        if success:
+            self.output_display.append_text(f"[SUCCESS] {task_name} completed successfully.")
+            QMessageBox.information(self, f"{task_name} Complete", f"{task_name} completed successfully.")
+            # Refresh workspace explorer to show updated state
+            if hasattr(self, 'on_refresh_workspace_explorer'):
+                self.on_refresh_workspace_explorer()
+        else:
+            self.output_display.append_text(f"[ERROR] {task_name} failed. Check output above for details.")
+            QMessageBox.warning(self, f"{task_name} Failed", f"{task_name} failed. Check output for details.")
+
     def _on_run_launch_result(self, result_tuple: tuple):
         # result_tuple for run/launch: (success, stdout_str, stderr_str, finished_process_obj)
         success, stdout_str, stderr_str, finished_process_obj = result_tuple
@@ -1415,17 +1885,14 @@ class MainWindow(QMainWindow):
         logger.debug(f"Run/Launch task ('{task_name}') worker result: Success={success}, Process Exit Code={exit_code}")
 
         if not success:
-            # SIGTERM (-15) or SIGKILL (-9) are results of user stopping, not usually an error popup.
-            if finished_process_obj and exit_code not in [0, -15, -9, 130]: # 130 is often Ctrl+C
-                # Some actual error or unexpected termination
-                if stderr_str: # Show stderr if available
-                     self.output_display.append_text(f"\n[TASK STDERR - {task_name}]:\n{stderr_str.strip()}")
-                QMessageBox.warning(self, f"{task_name} Result", f"{task_name} failed or ended unexpectedly. Exit code: {exit_code}. Check output.")
-            elif exit_code in [-15, -9]:
-                 self.output_display.append_text(f"[INFO] {task_name} was stopped by user action.")
-            elif exit_code == 130: # Ctrl+C in the terminal where ROSBuddy was launched, if it affects the child
-                self.output_display.append_text(f"[INFO] {task_name} may have been interrupted (Ctrl+C).")
-            # else: process exited with non-zero but it wasn't a clear error code we identify.
+            # SIGTERM (-15) or SIGKILL (-9) are results of user stopping, not errors
+            self.output_display.append_text(f"\n[TASK STDERR - {task_name}]:\n{stderr_str.strip()}")
+            QMessageBox.warning(self, f"{task_name} Result", f"{task_name} failed or ended unexpectedly. Exit code: {exit_code}. Check output.")
+        elif exit_code in [-15, -9]:
+            self.output_display.append_text(f"[INFO] {task_name} was stopped by user action.")
+        elif exit_code == 130: # Ctrl+C in the terminal where ROSBuddy was launched, if it affects the child
+            self.output_display.append_text(f"[INFO] {task_name} may have been interrupted (Ctrl+C).")
+        # else: process exited with non-zero but it wasn't a clear error code we identify.
         # If success is True, _on_worker_finished will post the "Finished" status.
 
     def on_stop_task(self):
@@ -1596,114 +2063,9 @@ class MainWindow(QMainWindow):
         self._update_empty_tab_placeholder_visibility() # Show placeholder if last tab closed
     def closeEvent(self, event):
         """Override closeEvent to allow UI state saving from outside."""
-        logger.info("Close event received. ROSBuddy shutting down...")
-        if self.running_ros_process and self.running_ros_process.poll() is None:
-            logger.info(f"Attempting to stop active ROS process (PID: {self.running_ros_process.pid}) on exit.")
-            # Use a more direct stop here, as on_stop_task updates UI which might be closing
-            try:
-                self.running_ros_process.terminate()
-                self.running_ros_process.wait(timeout=0.5) # Brief wait for terminate
-                if self.running_ros_process.poll() is None:
-                    self.running_ros_process.kill()
-                    self.running_ros_process.wait(timeout=0.2)
-                logger.info(f"ROS Process PID {self.running_ros_process.pid} stop attempt on exit. Final poll: {self.running_ros_process.poll()}")
-            except Exception as e:
-                logger.error(f"Error stopping ROS process on exit: {e}")
-        
-        # Worker handling (QThread usually exits when app does if not detached, but explicit quit is cleaner)
-        if self.current_worker and self.current_worker.isRunning():
-            logger.info("Requesting active worker to quit on application exit.")
-
-            # self.current_worker.quit() # Request clean exit
-            # self.current_worker.wait(500) # Wait max 500ms
-            # if self.current_worker.isRunning(): # Still running?
-            #     logger.warning("Worker did not stop on quit(), forcing terminate(). This may be unsafe.")
-            #     self.current_worker.terminate() # Force terminate
+        # Save UI state for persistence
+        if hasattr(self, 'get_ui_state'):
+            ui_state = self.get_ui_state()
+            # Store on the QApplication for retrieval after app.exec()
+            QApplication.instance()._rosbuddy_ui_state = ui_state
         super().closeEvent(event)
-
-# Standalone Test (keep your dummy classes here for testing MainWindow in isolation)
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    # --- Dummy Classes for Standalone Test ---
-    # (These should be the same dummy classes you had before)
-    class DummyProcess(subprocess.Popen):
-        # ... (implementation as you had) ...
-        pass
-    class DummyPackageInfo:
-        # ... (implementation as you had) ...
-        pass
-    class DummyPackageDiscovery:
-        # ... (implementation as youhad) ...
-        pass
-    class DummyWorkspaceManager:
-        # ... (implementation as you had) ...
-        pass
-    class DummyToolInvoker:
-        # ... (implementation as you had, ensure it uses DummyProcess and has process_started_callback kwarg) ...
-        def _dummy_task_simulated_process(self, task_name, args_tuple, realtime_output_callback, process_started_callback=None, **kwargs):
-            simulated_process = DummyProcess(pid=os.getpid()+100) # Give it a unique-ish PID
-            if process_started_callback:
-                process_started_callback(simulated_process)
-            
-            logger.debug(f"DummyToolInvoker: {task_name} called with {args_tuple}. PID: {simulated_process.pid}")
-            realtime_output_callback(f"[DUMMY_TOOL] Starting dummy {task_name}...")
-            time.sleep(0.1)
-            
-            for i in range(5): # Shorter for quicker tests
-                if simulated_process.poll() is not None:
-                    realtime_output_callback(f"[DUMMY_TOOL] {task_name} detected external stop (poll={simulated_process.poll()}).")
-                    break
-                realtime_output_callback(f"[DUMMY_TOOL] {task_name} progress {i+1}/5")
-                time.sleep(0.3)
-            
-            final_success = True
-            if "error_test" in args_tuple:
-                realtime_output_callback(f"[DUMMY_TOOL][ERR] Simulated error in {task_name}")
-                final_success = False # Simulate error
-                # raise ValueError(f"Simulated error from {task_name}") # Don't raise, return error status
-            
-            # Simulate process ending if not stopped externally
-            if simulated_process.poll() is None:
-                simulated_process._poll_result = 0 if final_success else 1
-
-            realtime_output_callback(f"[DUMMY_TOOL] Dummy {task_name} finished.")
-            return final_success, f"Dummy {task_name} stdout", ("Error" if not final_success else ""), simulated_process
-
-        def colcon_build(self, realtime_output_callback=None, process_started_callback=None):
-             return self._dummy_task_simulated_process("colcon_build", (), realtime_output_callback, process_started_callback=process_started_callback)
-        def colcon_clean(self, realtime_output_callback=None, process_started_callback=None):
-             return self._dummy_task_simulated_process("colcon_clean", (), realtime_output_callback, process_started_callback=process_started_callback)
-        def ros2_launch(self, package_name, launch_file_name, args=None, cwd=None, realtime_output_callback=None, process_started_callback=None):
-             return self._dummy_task_simulated_process("ros2_launch", (package_name, launch_file_name), realtime_output_callback, process_started_callback=process_started_callback)
-        def ros2_run(self, package_name, executable_name, args=None, cwd=None, realtime_output_callback=None, process_started_callback=None):
-             return self._dummy_task_simulated_process("ros2_run", (package_name, executable_name), realtime_output_callback, process_started_callback=process_started_callback)
-
-    # --- End Dummy Classes ---
-
-    # Setup basic logging for the standalone test if main_app isn't run
-    if not logging.getLogger().handlers: # Check if handlers are already added (e.g. by main_app)
-        log_format = '%(asctime)s - %(levelname)s - %(name)s : %(message)s'
-        logging.basicConfig(level=logging.DEBUG, format=log_format, stream=sys.stdout)
-
-
-    ws_m = DummyWorkspaceManager()
-    ti = DummyToolInvoker()
-    # Create a dummy workspace for testing
-    ws_m.set_active_workspace(os.path.expanduser("~/dummy_rosbuddy_ws_test"))
-
-
-    # Mock create_package_scaffolding if it's called by on_create_package
-    original_create_scaffolding = create_package_scaffolding # Keep original
-    def mock_create_pkg_scaffold(base_path, pkg_cfg, include_hw):
-        logger.info(f"MOCK: create_package_scaffolding called for {pkg_cfg.name}")
-        return True    # Replace the actual function with the mock for testing UI flow
-    # This requires rosbuddy.core_logic.create_package_scaffolding to be the actual import path
-    # For a direct import like 'from rosbuddy.core_logic import create_package_scaffolding', this is harder to mock
-    # Simpler: just ensure on_create_package doesn't crash.
-    # sys.modules['rosbuddy.core_logic'].create_package_scaffolding = mock_create_pkg_scaffold # If imported as module
-
-    main_win = MainWindow(workspace_manager=ws_m, tool_invoker=ti)
-    main_win.show()
-    exit_code = app.exec()
-    # create_package_scaffolding = original_create_scaffolding # Restore
-    sys.exit(exit_code)

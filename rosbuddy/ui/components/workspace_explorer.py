@@ -55,16 +55,8 @@ class WorkspaceExplorer(QWidget):
         # Recognized file extensions for ROS/typical text files
         recognized_exts = {".py", ".cpp", ".hpp", ".xml", ".yaml", ".yml", ".txt", ".md", ".msg", ".srv", ".action"}
 
-        # Icons
-        icon_file = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
-        icon_folder = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-        icon_xml = QIcon.fromTheme("text-xml", icon_file)
-        icon_cmake = QIcon.fromTheme("text-x-cmake", icon_file)
-        icon_python = QIcon.fromTheme("text-x-python", icon_file)
-        icon_yaml = QIcon.fromTheme("text-x-yaml", icon_file)
-        icon_msg = QIcon.fromTheme("text-x-generic", icon_file)
-        icon_srv = QIcon.fromTheme("text-x-generic", icon_file)
-        icon_action = QIcon.fromTheme("text-x-generic", icon_file)
+        important_files = {"package.xml", "CMakeLists.txt"}
+        important_dirs = {"src", "include", "launch", "config", "msg", "srv", "action"}
 
         try:
             # Sort: directories first, then files, all alphabetically
@@ -81,24 +73,8 @@ class WorkspaceExplorer(QWidget):
                     )
                     if not show_file:
                         continue
-                    # Icon selection
-                    if item_name == "package.xml":
-                        current_icon = icon_xml
-                    elif item_name == "CMakeLists.txt":
-                        current_icon = icon_cmake
-                    elif item_name == "setup.py" or item_path.suffix == ".py":
-                        current_icon = icon_python
-                    elif item_path.suffix in {".yaml", ".yml"}:
-                        current_icon = icon_yaml
-                    elif item_path.suffix == ".msg":
-                        current_icon = icon_msg
-                    elif item_path.suffix == ".srv":
-                        current_icon = icon_srv
-                    elif item_path.suffix == ".action":
-                        current_icon = icon_action
-                    else:
-                        current_icon = icon_file
-                    file_item = QStandardItem(current_icon, item_name)
+                    # No icon, just text
+                    file_item = QStandardItem(item_name)
                     file_item.setEditable(False)
                     file_item.setData(str(item_path.resolve()), item_data_role)
                     parent_item.appendRow(file_item)
@@ -107,7 +83,8 @@ class WorkspaceExplorer(QWidget):
                     # Only show important directories
                     if item_name not in important_dirs:
                         continue
-                    dir_item = QStandardItem(icon_folder, item_name)
+                    # No icon, just text
+                    dir_item = QStandardItem(item_name)
                     dir_item.setEditable(False)
                     dir_item.setData(str(item_path.resolve()), item_data_role)
                     parent_item.appendRow(dir_item)

@@ -56,11 +56,14 @@ class WelcomeView(BaseView):
             ("launch_runner", "Launch Runner", "Manage and run ROS 2 launch files.", "application-x-executable"), # Placeholder icon
         ]
 
+        from rosbuddy.utils.icon_manager import IconManager
+        icon_manager = IconManager(self.style())
+
         row, col = 0, 0
         max_cols = 3 # Adjust as needed
 
         for action_id, title, desc, icon_name in card_definitions:
-            icon = QIcon.fromTheme(icon_name, QIcon()) # Fallback to empty QIcon
+            icon = icon_manager.get_icon(icon_name)
             card = ActionCard(action_id, title, desc, icon)
             card.clicked.connect(self.action_card_clicked) # Emit signal from WelcomeView
             grid_layout.addWidget(card, row, col)

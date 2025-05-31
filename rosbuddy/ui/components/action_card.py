@@ -38,10 +38,6 @@ class ActionCard(QFrame):
         layout.setSpacing(10)
 
         header_layout = QHBoxLayout()
-        if icon:
-            icon_label = QLabel()
-            icon_label.setPixmap(icon.pixmap(32, 32)) # Adjust size as needed
-            header_layout.addWidget(icon_label)
 
         title_label = QLabel(title_text)
         title_label.setObjectName("actionCardTitle")

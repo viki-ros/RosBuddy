@@ -4,8 +4,14 @@ from pathlib import Path
 from typing import List
 from rosbuddy.data_models.interface_definition import InterfaceFileDefinition
 import logging
+from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+class CMakeUpdateStatus(Enum):
+    UPDATED = "updated"
+    NO_CHANGES = "no_changes"
+    ERROR = "error"
 
 def _ensure_find_package(lines: List[str], package_name: str) -> bool:
     """
@@ -47,7 +53,7 @@ def _ensure_find_package(lines: List[str], package_name: str) -> bool:
     lines.insert(insert_index, f"find_package({package_name} REQUIRED)\n")
     return True
 
-def update_cmakelists_for_new_interface(cmakelists_path: Path, iface_def: InterfaceFileDefinition, project_name: str) -> bool:
+def update_cmakelists_for_new_interface(cmakelists_path: Path, iface_def: InterfaceFileDefinition, project_name: str) -> CMakeUpdateStatus:
     try:
         with open(cmakelists_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -148,12 +154,11 @@ def update_cmakelists_for_new_interface(cmakelists_path: Path, iface_def: Interf
         if lines != original_lines:
             with open(cmakelists_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
-            return True
-        return False # No changes made
-
+            return CMakeUpdateStatus.UPDATED
+        return CMakeUpdateStatus.NO_CHANGES
     except Exception as e:
         logger.error(f"Error updating {cmakelists_path}: {e}", exc_info=True)
-        return False
+        return CMakeUpdateStatus.ERROR
 
 def add_cpp_node_to_cmakelists(cmakelists_path: Path, node_name: str, sources: List[str]) -> bool:
     """
@@ -263,4 +268,108 @@ def add_cpp_node_to_cmakelists(cmakelists_path: Path, node_name: str, sources: L
 
     except Exception as e:
         logger.error(f"Error updating CMakeLists.txt for node {node_name}: {e}", exc_info=True)
+        return False
+
+def update_cmakelists_for_new_cpp_node(
+    cmake_path: Path,
+    pkg_name: str,
+    node_name: str,
+    class_name: str,
+    additional_message_dependencies: list
+) -> bool:
+    """
+    Updates CMakeLists.txt to add a new standalone C++ node executable, link dependencies, and install headers.
+    """
+    try:
+        with open(cmake_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        original_lines = list(lines)
+
+        # Ensure find_package(ament_cmake REQUIRED)
+        _ensure_find_package(lines, "ament_cmake")
+        # Ensure find_package(rclcpp REQUIRED)
+        _ensure_find_package(lines, "rclcpp")
+        # Ensure find_package for each message dependency
+        for dep in additional_message_dependencies:
+            _ensure_find_package(lines, dep)
+
+        # Add include_directories(include) if not present
+        if not any(re.match(r'^\s*include_directories\(\s*include\s*\)', l) for l in lines):
+            # Insert after find_package or at the top
+            insert_idx = 0
+            for i, l in enumerate(lines):
+                if l.strip().startswith('find_package'):
+                    insert_idx = i + 1
+            lines.insert(insert_idx, 'include_directories(include)\n')
+
+        # Add add_executable
+        exe_line = f"add_executable({node_name}_exe src/{node_name}.cpp)\n"
+        if not any(exe_line.strip() in l for l in lines):
+            # Insert before ament_package or at end
+            insert_idx = len(lines)
+            for i, l in enumerate(lines):
+                if re.match(r'^\s*ament_package\(\s*\)', l):
+                    insert_idx = i
+                    break
+            lines.insert(insert_idx, '\n# Node executable\n' + exe_line)
+
+        # Add ament_target_dependencies
+        dep_line = f"ament_target_dependencies({node_name}_exe rclcpp {' '.join(additional_message_dependencies)})\n"
+        if not any(dep_line.strip() in l for l in lines):
+            # Insert after add_executable
+            for i, l in enumerate(lines):
+                if exe_line.strip() in l:
+                    lines.insert(i + 1, dep_line)
+                    break
+
+        # Add install(TARGETS ...)
+        install_targets_pattern = re.compile(r'^\s*install\(\s*TARGETS', re.IGNORECASE)
+        found_install_targets = False
+        for i, l in enumerate(lines):
+            if install_targets_pattern.match(l):
+                found_install_targets = True
+                # Insert node_name_exe if not present
+                block_end = i
+                for j in range(i + 1, len(lines)):
+                    if ')' in lines[j]:
+                        block_end = j
+                        break
+                if not any(f"{node_name}_exe" in lines[j] for j in range(i, block_end)):
+                    lines.insert(block_end, f"  {node_name}_exe\n")
+                break
+        if not found_install_targets:
+            # Add a new install block
+            install_block = [
+                '\n# Install targets\n',
+                'install(TARGETS\n',
+                f'  {node_name}_exe\n',
+                '  DESTINATION lib/${PROJECT_NAME}\n',
+                ')\n'
+            ]
+            # Insert before ament_package
+            insert_idx = len(lines)
+            for i, l in enumerate(lines):
+                if re.match(r'^\s*ament_package\(\s*\)', l):
+                    insert_idx = i
+                    break
+            lines[insert_idx:insert_idx] = install_block
+
+        # Add install headers
+        install_headers_line = 'install(DIRECTORY include/ DESTINATION include FILES_MATCHING PATTERN "*.hpp")\n'
+        if not any('install(DIRECTORY include/' in l and 'PATTERN "*.hpp"' in l for l in lines):
+            # Insert before ament_package
+            insert_idx = len(lines)
+            for i, l in enumerate(lines):
+                if re.match(r'^\s*ament_package\(\s*\)', l):
+                    insert_idx = i
+                    break
+            lines.insert(insert_idx, install_headers_line)
+
+        if lines != original_lines:
+            with open(cmake_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error updating {cmake_path}: {e}", exc_info=True)
         return False

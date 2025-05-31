@@ -4,6 +4,8 @@ import pathlib
 import argparse
 import json
 import logging
+import base64
+from PyQt6.QtCore import QByteArray
 
 # Add the project directory to Python's path so it can find the 'rosbuddy' package
 project_root = pathlib.Path(__file__).resolve().parent
@@ -18,15 +20,33 @@ def load_settings():
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH, 'r') as f:
-                return json.load(f)
+                settings = json.load(f)
+                # Decode geometry and splitter state from base64 if present
+                if 'window_geometry' in settings and isinstance(settings['window_geometry'], str):
+                    try:
+                        settings['window_geometry'] = QByteArray.fromBase64(settings['window_geometry'].encode('ascii'))
+                    except Exception:
+                        settings['window_geometry'] = None
+                if 'splitter_state' in settings and isinstance(settings['splitter_state'], str):
+                    try:
+                        settings['splitter_state'] = QByteArray.fromBase64(settings['splitter_state'].encode('ascii'))
+                    except Exception:
+                        settings['splitter_state'] = None
+                return settings
         except Exception as e:
             logging.warning(f"Failed to load settings: {e}")
     return {}
 
 def save_settings(settings):
     try:
+        # Encode geometry and splitter state as base64 strings for JSON
+        to_save = dict(settings)
+        if 'window_geometry' in to_save and isinstance(to_save['window_geometry'], QByteArray):
+            to_save['window_geometry'] = bytes(to_save['window_geometry'].toBase64()).decode('ascii')
+        if 'splitter_state' in to_save and isinstance(to_save['splitter_state'], QByteArray):
+            to_save['splitter_state'] = bytes(to_save['splitter_state'].toBase64()).decode('ascii')
         with open(SETTINGS_PATH, 'w') as f:
-            json.dump(settings, f, indent=2)
+            json.dump(to_save, f, indent=2)
     except Exception as e:
         logging.warning(f"Failed to save settings: {e}")
 
@@ -61,6 +81,8 @@ def main() -> None:
         if ui_state:
             settings['window_geometry'] = ui_state.get('window_geometry')
             settings['splitter_state'] = ui_state.get('splitter_state')
+            if 'last_workspace' in ui_state:
+                settings['last_workspace'] = ui_state['last_workspace']
     except Exception as e:
         logging.error(f"Failed to start ROSBuddy GUI: {e}")
         import traceback
@@ -72,8 +94,6 @@ def main() -> None:
         except Exception as dialog_exc:
             logging.error(f"Additionally failed to show error dialog: {dialog_exc}")
     # Save last workspace and UI state on exit
-    if workspace_to_open:
-        settings['last_workspace'] = workspace_to_open
     save_settings(settings)
 
 if __name__ == '__main__':

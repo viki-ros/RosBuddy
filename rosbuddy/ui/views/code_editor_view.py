@@ -5,12 +5,427 @@ from typing import Optional # Added Optional for type hinting
 from PyQt6.QtWidgets import ( QStyle, # Added QStyle
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox, QToolButton, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPalette, QColor
+from PyQt6.QtCore import Qt, pyqtSignal, QRect
+from PyQt6.QtGui import QFont, QPalette, QColor, QSyntaxHighlighter, QTextCharFormat, QTextDocument, QPainter
 
 from .base_view import BaseView
 
 logger = logging.getLogger(__name__)
+
+class LineNumberArea(QWidget):
+    """Line number area widget for the code editor."""
+    
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.code_editor = editor
+        
+    def sizeHint(self):
+        return self.code_editor.line_number_area_width()
+        
+    def paintEvent(self, event):
+        self.code_editor.line_number_area_paint_event(event)
+
+class PythonSyntaxHighlighter(QSyntaxHighlighter):
+    """Python syntax highlighter."""
+    
+    def __init__(self, document):
+        super().__init__(document)
+        self.highlighting_rules = []
+        
+        # Define formats
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor("#569CD6"))  # Blue for keywords
+        keyword_format.setFontWeight(QFont.Weight.Bold)
+        
+        keywords = [
+            "and", "as", "assert", "break", "class", "continue", "def", "del",
+            "elif", "else", "except", "finally", "for", "from", "global", "if",
+            "import", "in", "is", "lambda", "not", "or", "pass", "raise",
+            "return", "try", "while", "with", "yield", "async", "await", "nonlocal"
+        ]
+        
+        for keyword in keywords:
+            self.highlighting_rules.append((f"\\b{keyword}\\b", keyword_format))
+        
+        # String literals
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("#CE9178"))  # Orange for strings
+        self.highlighting_rules.append(('""".*?"""', string_format))
+        self.highlighting_rules.append(("'''.*?'''", string_format))
+        self.highlighting_rules.append('"[^"\\\\]*(\\\\.[^"\\\\]*)*"', string_format)
+        self.highlighting_rules.append("'[^'\\\\]*(\\\\.[^'\\\\]*)*'", string_format)
+        
+        # Comments
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#6A9955"))  # Green for comments
+        self.highlighting_rules.append(("#[^\r\n]*", comment_format))
+        
+        # Numbers
+        number_format = QTextCharFormat()
+        number_format.setForeground(QColor("#B5CEA8"))  # Light green for numbers
+        self.highlighting_rules.append(("\\b[0-9]+\\.?[0-9]*\\b", number_format))
+        
+        # Function definitions
+        function_format = QTextCharFormat()
+        function_format.setForeground(QColor("#DCDCAA"))  # Yellow for functions
+        function_format.setFontWeight(QFont.Weight.Bold)
+        self.highlighting_rules.append(("\\bdef\\s+([a-zA-Z_][a-zA-Z0-9_]*)", function_format))
+        
+        # Class definitions
+        class_format = QTextCharFormat()
+        class_format.setForeground(QColor("#4EC9B0"))  # Teal for classes
+        class_format.setFontWeight(QFont.Weight.Bold)
+        self.highlighting_rules.append(("\\bclass\\s+([a-zA-Z_][a-zA-Z0-9_]*)", class_format))
+        
+    def highlightBlock(self, text):
+        import re
+        for pattern, format in self.highlighting_rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class CppSyntaxHighlighter(QSyntaxHighlighter):
+    """C++ syntax highlighter."""
+    
+    def __init__(self, document):
+        super().__init__(document)
+        self.highlighting_rules = []
+        
+        # Define formats
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor("#569CD6"))  # Blue for keywords
+        keyword_format.setFontWeight(QFont.Weight.Bold)
+        
+        keywords = [
+            "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor",
+            "bool", "break", "case", "catch", "char", "char16_t", "char32_t",
+            "class", "compl", "const", "constexpr", "const_cast", "continue",
+            "decltype", "default", "delete", "do", "double", "dynamic_cast",
+            "else", "enum", "explicit", "export", "extern", "false", "float",
+            "for", "friend", "goto", "if", "inline", "int", "long", "mutable",
+            "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator",
+            "or", "or_eq", "private", "protected", "public", "register",
+            "reinterpret_cast", "return", "short", "signed", "sizeof", "static",
+            "static_assert", "static_cast", "struct", "switch", "template",
+            "this", "thread_local", "throw", "true", "try", "typedef", "typeid",
+            "typename", "union", "unsigned", "using", "virtual", "void",
+            "volatile", "wchar_t", "while", "xor", "xor_eq", "override", "final"
+        ]
+        
+        for keyword in keywords:
+            self.highlighting_rules.append((f"\\b{keyword}\\b", keyword_format))
+        
+        # String literals
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("#CE9178"))  # Orange for strings
+        self.highlighting_rules.append('"[^"\\\\]*(\\\\.[^"\\\\]*)*"', string_format)
+        
+        # Comments
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#6A9955"))  # Green for comments
+        self.highlighting_rules.append(("//[^\r\n]*", comment_format))
+        self.highlighting_rules.append(("/\\*.*?\\*/", comment_format))
+        
+        # Numbers
+        number_format = QTextCharFormat()
+        number_format.setForeground(QColor("#B5CEA8"))  # Light green for numbers
+        self.highlighting_rules.append(("\\b[0-9]+\\.?[0-9]*[fFlL]?\\b", number_format))
+        
+        # Preprocessor directives
+        preprocessor_format = QTextCharFormat()
+        preprocessor_format.setForeground(QColor("#C586C0"))  # Purple for preprocessor
+        self.highlighting_rules.append(("^\\s*#[^\r\n]*", preprocessor_format))
+        
+    def highlightBlock(self, text):
+        import re
+        for pattern, format in self.highlighting_rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class XmlSyntaxHighlighter(QSyntaxHighlighter):
+    """XML/YAML syntax highlighter."""
+    
+    def __init__(self, document):
+        super().__init__(document)
+        self.highlighting_rules = []
+        
+        # XML tags
+        tag_format = QTextCharFormat()
+        tag_format.setForeground(QColor("#569CD6"))  # Blue for tags
+        tag_format.setFontWeight(QFont.Weight.Bold)
+        self.highlighting_rules.append(("<[^>]+>", tag_format))
+        
+        # XML attributes
+        attr_format = QTextCharFormat()
+        attr_format.setForeground(QColor("#92C5F8"))  # Light blue for attributes
+        self.highlighting_rules.append(("\\b[a-zA-Z_][a-zA-Z0-9_]*(?=\\s*=)", attr_format))
+        
+        # String values
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("#CE9178"))  # Orange for strings
+        self.highlighting_rules.append('"[^"]*"', string_format)
+        self.highlighting_rules.append("'[^']*'", string_format)
+        
+        # Comments
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#6A9955"))  # Green for comments
+        self.highlighting_rules.append(("<!--.*?-->", comment_format))
+        
+    def highlightBlock(self, text):
+        import re
+        for pattern, format in self.highlighting_rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class CMakeSyntaxHighlighter(QSyntaxHighlighter):
+    """CMake syntax highlighter for CMakeLists.txt files."""
+    
+    def __init__(self, document):
+        super().__init__(document)
+        self.highlighting_rules = []
+        
+        # Define formats
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(QColor("#569CD6"))  # Blue for keywords
+        keyword_format.setFontWeight(QFont.Weight.Bold)
+        
+        # CMake commands
+        cmake_commands = [
+            "cmake_minimum_required", "project", "find_package", "add_executable",
+            "add_library", "target_link_libraries", "target_include_directories",
+            "target_compile_definitions", "install", "set", "option", "if", "else",
+            "elseif", "endif", "foreach", "endforeach", "while", "endwhile",
+            "function", "endfunction", "macro", "endmacro", "include", "add_subdirectory",
+            "message", "list", "string", "file", "configure_file"
+        ]
+        
+        for command in cmake_commands:
+            self.highlighting_rules.append((f"\\b{command}\\b", keyword_format))
+        
+        # Variables
+        variable_format = QTextCharFormat()
+        variable_format.setForeground(QColor("#4FC1FF"))  # Light blue for variables
+        self.highlighting_rules.append((r"\$\{[^}]+\}", variable_format))
+        
+        # String literals
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("#CE9178"))  # Orange for strings
+        self.highlighting_rules.append(('"[^"]*"', string_format))
+        
+        # Comments
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#6A9955"))  # Green for comments
+        self.highlighting_rules.append((r"#[^\r\n]*", comment_format))
+        
+    def highlightBlock(self, text):
+        import re
+        for pattern, format in self.highlighting_rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class YamlSyntaxHighlighter(QSyntaxHighlighter):
+    """YAML syntax highlighter for configuration files."""
+    
+    def __init__(self, document):
+        super().__init__(document)
+        self.highlighting_rules = []
+        
+        # Define formats
+        key_format = QTextCharFormat()
+        key_format.setForeground(QColor("#9CDCFE"))  # Light blue for keys
+        key_format.setFontWeight(QFont.Weight.Bold)
+        
+        # YAML keys (word: or word followed by colon)
+        self.highlighting_rules.append((r"^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*:", key_format))
+        
+        # String values
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("#CE9178"))  # Orange for strings
+        self.highlighting_rules.append(('"[^"]*"', string_format))
+        self.highlighting_rules.append("'[^']*'", string_format)
+        
+        # Numbers
+        number_format = QTextCharFormat()
+        number_format.setForeground(QColor("#B5CEA8"))  # Light green for numbers
+        self.highlighting_rules.append((r"\b[0-9]+\.?[0-9]*\b", number_format))
+        
+        # Boolean values
+        bool_format = QTextCharFormat()
+        bool_format.setForeground(QColor("#569CD6"))  # Blue for booleans
+        bool_format.setFontWeight(QFont.Weight.Bold)
+        self.highlighting_rules.append((r"\b(true|false|True|False|yes|no|Yes|No)\b", bool_format))
+        
+        # Comments
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#6A9955"))  # Green for comments
+        self.highlighting_rules.append((r"#[^\r\n]*", comment_format))
+        
+        # Special YAML characters
+        special_format = QTextCharFormat()
+        special_format.setForeground(QColor("#D4D4D4"))  # Light gray
+        self.highlighting_rules.append((r"[-|>]", special_format))
+        
+    def highlightBlock(self, text):
+        import re
+        for pattern, format in self.highlighting_rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class LaunchSyntaxHighlighter(QSyntaxHighlighter):
+    """Launch file syntax highlighter for ROS 2 launch files."""
+    
+    def __init__(self, document):
+        super().__init__(document)
+        self.highlighting_rules = []
+        
+        # Define formats
+        tag_format = QTextCharFormat()
+        tag_format.setForeground(QColor("#569CD6"))  # Blue for tags
+        tag_format.setFontWeight(QFont.Weight.Bold)
+        
+        # ROS Launch specific tags
+        launch_tags = [
+            "launch", "node", "param", "remap", "include", "group", "test",
+            "executable", "arg", "let", "set_env", "unset_env", "declare_parameter"
+        ]
+        
+        for tag in launch_tags:
+            self.highlighting_rules.append((f"</?{tag}\\b[^>]*>", tag_format))
+        
+        # Generic XML tags
+        self.highlighting_rules.append((r"<[^>]+>", tag_format))
+        
+        # Attributes
+        attr_format = QTextCharFormat()
+        attr_format.setForeground(QColor("#92C5F8"))  # Light blue for attributes
+        self.highlighting_rules.append((r"\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*=)", attr_format))
+        
+        # String values
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor("#CE9178"))  # Orange for strings
+        self.highlighting_rules.append(('"[^"]*"', string_format))
+        self.highlighting_rules.append("'[^']*'", string_format)
+        
+        # Comments
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#6A9955"))  # Green for comments
+        self.highlighting_rules.append((r"<!--.*?-->", comment_format))
+        
+    def highlightBlock(self, text):
+        import re
+        for pattern, format in self.highlighting_rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), format)
+
+class CodeEditorTextEdit(QTextEdit):
+    """Enhanced QTextEdit with line numbers and syntax highlighting."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.line_number_area = LineNumberArea(self)
+        self.syntax_highlighter = None
+        
+        # Connect signals
+        self.blockCountChanged.connect(self.update_line_number_area_width)
+        self.updateRequest.connect(self.update_line_number_area)
+        self.cursorPositionChanged.connect(self.highlight_current_line)
+        
+        self.update_line_number_area_width(0)
+        self.highlight_current_line()
+        
+        # Set up line highlighting
+        self.current_line_color = QColor("#2A2D30")
+        
+    def set_syntax_highlighting(self, file_path):
+        """Set syntax highlighting based on file path and extension."""
+        if self.syntax_highlighter:
+            self.syntax_highlighter.setDocument(None)
+            
+        if isinstance(file_path, str):
+            file_path = pathlib.Path(file_path)
+            
+        file_extension = file_path.suffix.lower()
+        file_name = file_path.name.lower()
+            
+        if file_extension in ['.py', '.pyx']:
+            self.syntax_highlighter = PythonSyntaxHighlighter(self.document())
+        elif file_extension in ['.cpp', '.cc', '.cxx', '.hpp', '.h', '.hxx']:
+            self.syntax_highlighter = CppSyntaxHighlighter(self.document())
+        elif file_extension in ['.xml'] or file_name.endswith('.launch'):
+            self.syntax_highlighter = XmlSyntaxHighlighter(self.document())
+        elif file_extension in ['.yaml', '.yml']:
+            self.syntax_highlighter = YamlSyntaxHighlighter(self.document())
+        elif file_name == 'cmakelists.txt' or file_extension == '.cmake':
+            self.syntax_highlighter = CMakeSyntaxHighlighter(self.document())
+        elif file_name.endswith('.launch.py'):
+            self.syntax_highlighter = LaunchSyntaxHighlighter(self.document())
+        # Add more highlighters as needed
+        
+    def line_number_area_width(self):
+        """Calculate the width needed for line numbers."""
+        digits = 1
+        count = max(1, self.blockCount())
+        while count >= 10:
+            count //= 10
+            digits += 1
+        space = 3 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
+        
+    def update_line_number_area_width(self, new_block_count):
+        """Update the line number area width."""
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+        
+    def update_line_number_area(self, rect, dy):
+        """Update the line number area when scrolling."""
+        if dy:
+            self.line_number_area.scroll(0, dy)
+        else:
+            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
+            
+        if rect.contains(self.viewport().rect()):
+            self.update_line_number_area_width(0)
+            
+    def resizeEvent(self, event):
+        """Handle resize events."""
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
+        
+    def line_number_area_paint_event(self, event):
+        """Paint the line number area."""
+        painter = QPainter(self.line_number_area)
+        painter.fillRect(event.rect(), QColor("#252526"))
+        
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        
+        painter.setPen(QColor("#858585"))
+        
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                painter.drawText(0, top, self.line_number_area.width() - 3, 
+                               self.fontMetrics().height(), Qt.AlignmentFlag.AlignRight, number)
+                               
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+            
+    def highlight_current_line(self):
+        """Highlight the current line."""
+        extra_selections = []
+        
+        if not self.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(self.current_line_color)
+            selection.format.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extra_selections.append(selection)
+            
+        self.setExtraSelections(extra_selections)
 
 class CodeEditorView(BaseView):
     """
@@ -84,7 +499,7 @@ class CodeEditorView(BaseView):
         main_view_layout.addLayout(header_layout)
 
         # --- Code Area ---
-        self.code_area = QTextEdit()
+        self.code_area = CodeEditorTextEdit()
         self.code_area.setObjectName("codeEditorArea")
         # Use a monospace font
         font = QFont("Fira Mono", 11) # Or Consolas, Monaco, etc.
@@ -136,7 +551,33 @@ class CodeEditorView(BaseView):
 
     def _update_status_label(self):
         cursor = self.code_area.textCursor()
-        self.status_label.setText(f"Ln {cursor.blockNumber() + 1}, Col {cursor.columnNumber() + 1} | Python (mock)")
+        language = self._detect_language()
+        self.status_label.setText(f"Ln {cursor.blockNumber() + 1}, Col {cursor.columnNumber() + 1} | {language}")
+        
+    def _detect_language(self):
+        """Detect the language based on file extension."""
+        if not self._file_path:
+            return "Text"
+            
+        file_extension = self._file_path.suffix.lower()
+        file_name = self._file_path.name.lower()
+        
+        if file_extension in ['.py', '.pyx']:
+            return "Python"
+        elif file_extension in ['.cpp', '.cc', '.cxx']:
+            return "C++"
+        elif file_extension in ['.hpp', '.h', '.hxx']:
+            return "C++ Header"
+        elif file_extension == '.xml' or file_name.endswith('.launch'):
+            return "XML"
+        elif file_extension in ['.yaml', '.yml']:
+            return "YAML"
+        elif file_name == 'cmakelists.txt' or file_extension == '.cmake':
+            return "CMake"
+        elif file_name.endswith('.launch.py'):
+            return "Launch (Python)"
+        else:
+            return "Text"
 
     def load_file(self, file_path: pathlib.Path) -> bool:
         self._file_path = file_path.resolve()
@@ -147,6 +588,9 @@ class CodeEditorView(BaseView):
             was_dirty = self._is_dirty # Preserve dirty state before setText
             self.code_area.setPlainText(content)
             self._set_dirty(was_dirty) # Restore or clear dirty state
+            
+            # Set syntax highlighting based on file path
+            self.code_area.set_syntax_highlighting(self._file_path)
             
             self.file_path_label.setText(str(self._file_path))
             super().set_view_title(self._file_path.name) # Update BaseView title
@@ -223,6 +667,7 @@ class CodeEditorView(BaseView):
 
 if __name__ == '__main__':
     import sys
+    from PyQt6.QtWidgets import QApplication
 
     # Adjust sys.path to allow running this module directly for testing
     # This assumes the script is in rosbuddy_app/RosBuddy/rosbuddy/ui/views/

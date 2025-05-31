@@ -12,8 +12,8 @@ if str(project_root_for_main_app) not in sys.path:
     sys.path.insert(0, str(project_root_for_main_app))
 # --- END: Path adjustment ---
 
-# Assuming MainWindow is in rosbuddy.ui.main_window
-from rosbuddy.ui.main_window import MainWindow
+# Import the new modern UI
+from rosbuddy.ui.modern_main_window import ModernMainWindow
 from rosbuddy.core_logic import WorkspaceManager, ToolInvoker # Import core logic classes
 
 # --- Global Logger for this file (main_app.py) ---
@@ -40,7 +40,7 @@ class RosBuddyApplication(QApplication):
         self.workspace_manager = WorkspaceManager()
         self.tool_invoker = ToolInvoker(self.workspace_manager)
         # Create and show the main window, passing logic components and UI state
-        self.main_window = MainWindow(
+        self.main_window = ModernMainWindow(
             workspace_manager=self.workspace_manager,
             tool_invoker=self.tool_invoker,
             window_geometry=window_geometry,
@@ -80,11 +80,11 @@ def main(workspace_path=None, window_geometry=None, splitter_state=None):
 
     module_logger.info("ROSBuddy Application GUI initialized and starting event loop...")
     exit_code = app.exec()
-    # Return UI state for persistence
-    ui_state = app.get_ui_state()
+    # Return UI state for persistence (from MainWindow via QApplication)
+    ui_state = getattr(app, '_rosbuddy_ui_state', None)
     module_logger.info(f"ROSBuddy Application exited with code {exit_code}.")
-    sys.exit(exit_code)
     return ui_state
+    # sys.exit(exit_code)  # Do not call sys.exit here, let the caller handle it
 
 if __name__ == '__main__':
     main()

@@ -92,6 +92,7 @@ class CppNodeGenerator:
         cpp_lines.append("")
         cpp_lines.append(f"}}  // namespace {namespace}")
         cpp_lines.append("")
+        # Standalone main()
         cpp_lines.append("int main(int argc, char * argv[]) {")
         cpp_lines.append("  rclcpp::init(argc, argv);")
         cpp_lines.append(f"  rclcpp::spin(std::make_shared<{namespace}::{class_name}>(rclcpp::NodeOptions()));")
